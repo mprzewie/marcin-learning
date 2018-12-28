@@ -1,6 +1,5 @@
 import torch.nn as nn
-from torch import Tensor
-
+import torch
 
 class UNet(nn.Module):
     def __init__(self):
@@ -8,10 +7,13 @@ class UNet(nn.Module):
         # downsampling
         self.dc1 = conv_block(3, 64)
         self.mp1 = nn.MaxPool2d(2)
+
         self.dc2 = conv_block(64, 128)
         self.mp2 = nn.MaxPool2d(2)
+
         self.dc3 = conv_block(128, 256)
         self.mp3 = nn.MaxPool2d(2)
+
         self.dc4 = conv_block(256, 512)
         self.mp4 = nn.MaxPool2d(2)
 
@@ -21,22 +23,29 @@ class UNet(nn.Module):
 
         self.up1 = nn.ConvTranspose2d(1024, 512, 2, 2)
         self.uc1 = conv_block(1024, 512)
+
         self.up2 = nn.ConvTranspose2d(512, 256, 2, 2)
         self.uc2 = conv_block(512, 256)
+
         self.up3 = nn.ConvTranspose2d(256, 128, 2, 2)
         self.uc3 = conv_block(256, 128)
+
         self.up4 = nn.ConvTranspose2d(128, 64, 2, 2)
         self.uc4 = conv_block(128, 64)
+
         self.oc = nn.Conv2d(64, 1, kernel_size=1, stride=1)
 
-    def forward(self, images: Tensor):
+    def forward(self, images: torch.Tensor):
         #down
         dc1o = self.dc1(images)
         mp1o = self.mp1(dc1o)
+
         dc2o = self.dc2(mp1o)
         mp2o = self.mp2(dc2o)
+
         dc3o = self.dc3(mp2o)
         mp3o = self.mp3(dc3o)
+
         dc4o = self.dc4(mp3o)
         mp4o = self.mp4(dc4o)
 
@@ -45,13 +54,20 @@ class UNet(nn.Module):
 
         #up
         up1o = self.up1(bco)
-        uc1o = self.uc1(up1o)
+        uc1in = torch.cat([up1o, dc4o], 1)
+        uc1o = self.uc1(uc1in)
+
         up2o = self.up2(uc1o)
-        uc2o = self.uc2(up2o)
+        uc2in = torch.cat([up2o, dc3o], 1)
+        uc2o = self.uc2(uc2in)
+
         up3o = self.up3(uc2o)
-        uc3o = self.uc3(up3o)
+        uc3in = torch.cat([up3o, dc2o], 1)
+        uc3o = self.uc3(uc3in)
+
         up4o = self.up4(uc3o)
-        uc4o = self.uc4(up4o)
+        uc4in = torch.cat([up4o, dc1o], 1)
+        uc4o = self.uc4(uc4in)
         output = self.oc(uc4o)
 
         return output
