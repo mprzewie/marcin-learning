@@ -1,8 +1,8 @@
 from typing import Sequence, List, Callable, Tuple
 
-import cv2
 import numpy as np
 from pycocotools.coco import COCO
+from pycocotools import mask as mask_utils
 from torch.utils.data import Dataset
 from pathlib import Path
 
@@ -15,7 +15,6 @@ class COCOStuff(Dataset):
     def __init__(
             self,
             images_path: Path,
-            masks_path: Path,
             annotations_json: Path,
             transformations: List[Callable] = None,
             target_transformations: List[Callable] = None
@@ -25,17 +24,20 @@ class COCOStuff(Dataset):
         if target_transformations is None:
             target_transformations = []
         self.images_path = images_path
-        self.masks_path = masks_path
         self.coco = COCO(annotations_json)
         self.transformations = transforms.Compose(transformations)
         self.target_transformations = transforms.Compose(target_transformations)
 
     def __getitem__(self, index: int):
-        image, mask = self.get_image_and_mask(self.image_ids[index])
+        image, mask = self.get_image_and_mask(self._image_id(index))
         return self.transformations(image), self.target_transformations(mask)
 
     def __len__(self):
         return len(self.image_ids)
+
+    @property
+    def n_classes(self) -> int:
+        return max([a["category_id"] for a in self.coco.anns.values()]) + 1
 
     @property
     def image_ids(self) -> List[int]:
@@ -48,14 +50,12 @@ class COCOStuff(Dataset):
         return Image.open(self._image_path(image_id))
 
     def _get_np_segmask(self, image_id: int) -> np.ndarray:
-        return cv2.imread(str(self._mask_path(image_id)), cv2.IMREAD_GRAYSCALE).astype(np.int64)
+        annotations = self.coco.loadAnns(self.coco.getAnnIds(image_id))
+        binary_masks = np.array([mask_utils.decode(a["segmentation"]) * a["category_id"] for a in annotations])
+        return binary_masks.max(axis=0)
 
     def _image_path(self, image_id: int) -> Path:
         return self.images_path / self._file_name(image_id)
-
-    def _mask_path(self, image_id: int, file_extension: str = "jpg", mask_extension: str = "png"):
-        mask_name = self._file_name(image_id).replace(file_extension, mask_extension)
-        return self.masks_path / mask_name
 
     def _image_id(self, index: int):
         return self.image_ids[index]
