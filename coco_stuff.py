@@ -47,11 +47,11 @@ class COCOStuff(Dataset):
         return self._get_pil_image(image_id), self._get_np_segmask(image_id)
 
     def _get_pil_image(self, image_id: int) -> Image.Image:
-        return Image.open(self._image_path(image_id))
+        return Image.open(self._image_path(image_id)).convert("RGB")
 
     def _get_np_segmask(self, image_id: int) -> np.ndarray:
         annotations = self.coco.loadAnns(self.coco.getAnnIds(image_id))
-        binary_masks = np.array([mask_utils.decode(a["segmentation"]) * a["category_id"] for a in annotations])
+        binary_masks = np.array([mask_utils.decode(a["segmentation"]) * a["category_id"] for a in annotations]) if len(annotations) > 0 else np.zeros([1, *self._get_pil_image(image_id).size])
         return binary_masks.max(axis=0)
 
     def _image_path(self, image_id: int) -> Path:
