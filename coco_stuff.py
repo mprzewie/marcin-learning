@@ -1,4 +1,4 @@
-from typing import Sequence, List, Callable, Tuple
+from typing import Sequence, List, Callable, Tuple, Dict
 
 import numpy as np
 from pycocotools.coco import COCO
@@ -17,7 +17,7 @@ class COCOStuff(Dataset):
             images_path: Path,
             annotations_json: Path,
             transformations: List[Callable] = None,
-            target_transformations: List[Callable] = None
+            target_transformations: List[Callable] = None,
     ):
         if transformations is None:
             transformations = []
@@ -36,8 +36,19 @@ class COCOStuff(Dataset):
         return len(self.image_ids)
 
     @property
+    def _categories_ids(self) -> Dict[int, int]:
+        return {
+            cat_id: i
+            for i, cat_id in enumerate(self.coco.getCatIds())
+        }
+
+    @property
+    def _background_id(self):
+        return max(self.coco.getCatIds())
+
+    @property
     def n_classes(self) -> int:
-        return max([a["category_id"] for a in self.coco.anns.values()]) + 1
+        return len(self._categories_ids)
 
     @property
     def image_ids(self) -> List[int]:
@@ -51,8 +62,16 @@ class COCOStuff(Dataset):
 
     def _get_np_segmask(self, image_id: int) -> np.ndarray:
         annotations = self.coco.loadAnns(self.coco.getAnnIds(image_id))
-        binary_masks = np.array([mask_utils.decode(a["segmentation"]) * a["category_id"] for a in annotations]) if len(annotations) > 0 else np.zeros([1, *self._get_pil_image(image_id).size])
-        return binary_masks.max(axis=0)
+        if len(annotations) > 0:
+            binary_masks = np.array([
+                self.coco.annToMask(a) * a["category_id"] for a in annotations
+            ])
+        else:
+            binary_masks = np.zeros([1, *self._get_pil_image(image_id).size])
+
+        mask = binary_masks.max(axis=0)
+        mask[mask == 0] = self._background_id
+        return mask
 
     def _image_path(self, image_id: int) -> Path:
         return self.images_path / self._file_name(image_id)
