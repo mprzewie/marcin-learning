@@ -6,13 +6,13 @@ class UNet(nn.Module):
         super().__init__()
         self.n_classes = n_classes
         # downsampling
-        self.dc1 = conv_block(3, 64)
+        self.dc1 = conv_block(3, 256)
         self.mp1 = nn.MaxPool2d(2)
 
-        self.dc2 = conv_block(64, 128)
+        self.dc2 = conv_block(256, 256)
         self.mp2 = nn.MaxPool2d(2)
 
-        self.dc3 = conv_block(128, 256)
+        self.dc3 = conv_block(256, 256)
         self.mp3 = nn.MaxPool2d(2)
 
         self.dc4 = conv_block(256, 512)
@@ -28,11 +28,11 @@ class UNet(nn.Module):
         self.up2 = nn.ConvTranspose2d(512, 256, 2, 2)
         self.uc2 = conv_block(512, 256)
 
-        self.up3 = nn.ConvTranspose2d(256, 128, 2, 2)
-        self.uc3 = conv_block(256, 256)
+        self.up3 = nn.ConvTranspose2d(256, 256, 2, 2)
+        self.uc3 = conv_block(512, 256)
 
-        self.up4 = nn.ConvTranspose2d(256, 192, 2, 2)
-        self.uc4 = conv_block(256, 256)
+        self.up4 = nn.ConvTranspose2d(256, 256, 2, 2)
+        self.uc4 = conv_block(512, 256)
 
         self.oc = nn.Conv2d(256, n_classes, kernel_size=1, stride=1)
 
