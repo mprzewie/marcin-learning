@@ -52,12 +52,13 @@ class _COCOStuff(Dataset):
 
     @property
     def _category_class_array(self) -> np.ndarray:
-        max_category = max(self.category_to_class.keys())
-        return np.array([self.category_to_class.get(cat, 0) for cat in range(max_category + 1)])
+        cat_to_class = self.category_to_class
+        max_category = max(cat_to_class.keys())
+        return np.array([cat_to_class.get(cat, 0) for cat in range(max_category + 1)])
 
     @property
     def n_classes(self) -> int:
-        return len(np.unique(self._category_class_array))
+        return len(set(self.category_to_class.values()))
 
     @property
     def image_ids(self) -> List[int]:
