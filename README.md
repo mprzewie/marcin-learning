@@ -1,3 +1,3 @@
-# pytorch-segmentation
+# marcin learning
 
-This repository contains my experiments with semantic segmentation implemented in PyTorch.
+This repository contains my experiments with machine learning. 
