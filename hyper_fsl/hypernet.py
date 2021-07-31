@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 from torch import nn, Tensor
@@ -30,19 +30,28 @@ def set_from_param_dict(net: nn.Module, param_dict: Dict[str, Tensor]):
         setattr(m, param_name, v)
 
 
+def sorted_by_label(X: torch.Tensor, Y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert len(X) == len(Y)
+
+    xy = sorted(zip(X, Y), key=lambda x_y: x_y[1])
+    X = torch.stack([x for (x,y) in xy])
+    Y = torch.stack([y for (x,y) in xy])
+
+    return X, Y
+
 
 class HyperNetwork(nn.Module):
     def __init__(
             self,
-            target_network: nn.Module,
+            # target_network: nn.Module,
             n: int, k: int,
-            fe_out_size: int = 1024,
+            hidden_size: int = 1024,
     ):
         super().__init__()
         self.n = n
         self.k = k
         self.fe = nn.Sequential(
-            nn.Conv2d(1+self.n, 64, 3, padding=1),
+            nn.Conv2d(1, 64, 3, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 64, 3, padding=1),
             nn.ReLU(),
@@ -52,11 +61,22 @@ class HyperNetwork(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 64, 3, padding=1, stride=2),
             nn.Flatten(),
-            nn.Linear(7*7*64, fe_out_size),
+            nn.Linear(7 * 7 * 64, hidden_size),
             nn.ReLU(),
-            nn.Linear(fe_out_size, fe_out_size)
+
         )
-        param_head_size = fe_out_size * n * k
+
+        target_network = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            # nn.ReLU(),
+            # nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, self.n)
+        )
+
+        param_head_size = (
+                                  hidden_size #+ n
+                           ) * n * k
 
         param_dict = get_param_dict(target_network)
 
@@ -75,33 +95,41 @@ class HyperNetwork(nn.Module):
 
         for name, param in param_dict.items():
             self.param_nets[name] = nn.Sequential(
-                nn.Linear(param_head_size, fe_out_size),
+                nn.Linear(param_head_size, hidden_size),
                 nn.ReLU(),
-                nn.Linear(fe_out_size, param.numel(), bias=False)
+                nn.Linear(hidden_size, param.numel())
             )
 
         self.target_network = target_network
 
     def forward(self, support_set: torch.Tensor, support_labels: torch.Tensor):
+
+        support_set, support_labels = sorted_by_label(support_set, support_labels)
+
         bs, c, h, w = support_set.shape
         bl = support_labels.shape[0]
         
         assert bs == bl == self.n * self.k, (bs, bl, self.n, self.k)
-        support_set_concat = append_onehot_channels(support_set, support_labels, self.n)
-        emb = self.fe(support_set_concat)
+        # support_set_concat = append_onehot_channels(support_set, support_labels, self.n)
+        emb = self.fe(support_set)
 
-        # concat embeddings
+
+        onehots = nnf.one_hot(support_labels, num_classes=self.n).float()
+
+        # emb = torch.cat([emb, onehots], dim=1)
+
         emb = emb.reshape(-1).unsqueeze(0)
-        
+        #
         # predict network params
         network_params = {
             name.replace("-", "."): param_net(emb).reshape(self.param_shapes[name])
             for name, param_net in self.param_nets.items()
         }
-
+        #
         tn = deepcopy(self.target_network)
         set_from_param_dict(tn, network_params)
-        return tn
+
+        return nn.Sequential(self.fe, tn)
 
 
 def append_onehot_channels(images: torch.Tensor, labels: torch.Tensor, n_classes: int) -> torch.Tensor:
