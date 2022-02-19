@@ -5,7 +5,7 @@ from torch import nn, Tensor
 from torch.hub import load_state_dict_from_url
 from torchvision.models.resnet import ResNet, BasicBlock, model_urls
 
-from condconv import CondConv, CondLinear, CondBatchNorm, CondSequential
+from cond_layers import CondConv, CondLinear, CondBatchNorm, CondSequential
 
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
@@ -31,7 +31,6 @@ class BasicResnetCondBlock(BasicBlock):
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
-        assert inplanes == planes, (inplanes, planes)
         nn.Module.__init__(self)
         if norm_layer is None:
             norm_layer = CondBatchNorm
@@ -92,13 +91,10 @@ class CondResnet(ResNet):
             replace_stride_with_dilation=replace_stride_with_dilation,
             norm_layer=norm_layer
         )
-        self.fc = nn.Linear(self.inplanes, num_classes)
 
     def _make_layer(self, block: Type[BasicResnetCondBlock], planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False) -> nn.Sequential:
 
-        # TODO - allow for changing num of channels
-        planes = self.inplanes
 
         norm_layer = self._norm_layer
         downsample = None
@@ -119,8 +115,7 @@ class CondResnet(ResNet):
             )
         )
 
-        # TODO allow for changing num of channels
-        # self.inplanes = planes * block.expansion
+        self.inplanes = planes * block.expansion
 
         for _ in range(1, blocks):
             layers.append(
@@ -144,9 +139,9 @@ class CondResnet(ResNet):
         x = self.maxpool(x)
 
         l1 = x = self.layer1(x, k=k)
-        l2 = x = self.layer2(x, k=k)
-        l3 = x = self.layer3(x, k=k)
-        l4 = x = self.layer4(x, k=k)
+        l2 = x = self.layer2(x, k=k*2)
+        l3 = x = self.layer3(x, k=k*4)
+        l4 = x = self.layer4(x, k=k*8)
 
         x = self.avgpool(x)
         penultimate = x = torch.flatten(x, 1)
@@ -174,6 +169,7 @@ def _cond_resnet(
 ) -> CondResnet:
     model = CondResnet(block, layers, **kwargs)
     if pretrained:
+        raise NotImplementedError()
         state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
         model.load_state_dict(state_dict)
     return model
@@ -190,25 +186,3 @@ def cond_resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any
     return _cond_resnet("resnet18", BasicResnetCondBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
 
-def test_resnet():
-
-    img = torch.randn(size=(1, 3, 10, 10))
-    r = cond_resnet18()
-    r.eval()
-
-    n_channels=64
-    _, intermediate_full = r(img, k=n_channels, return_intermediate=True)
-
-    for n in range(1, n_channels + 1):
-        _, intermediate_zero = r(img, k=n, return_intermediate=True)
-        for (k, v) in intermediate_zero.items():
-            print(
-                n, k,
-                torch.equal(v[0, n:], torch.zeros_like(v[0, n:])),
-                torch.equal(v[0, :n], intermediate_full[k][0, :n])
-
-            )
-
-
-if __name__ == "__main__":
-    test_resnet()
