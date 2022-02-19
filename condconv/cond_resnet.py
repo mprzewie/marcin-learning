@@ -1,11 +1,12 @@
-from typing import Optional, Callable, Type, Union, List, Any
+from typing import Optional, Callable, Type, List, Any
 
 import torch
 from torch import nn, Tensor
 from torch.hub import load_state_dict_from_url
 from torchvision.models.resnet import ResNet, BasicBlock, model_urls
 
-from cond_layers import CondConv, CondLinear, CondBatchNorm, CondSequential
+from cond_layers import CondConv, CondBatchNorm, CondSequential
+from condconv.resnet import ConfigurableResNet
 
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
@@ -67,7 +68,7 @@ class BasicResnetCondBlock(BasicBlock):
 
 
 
-class CondResnet(ResNet):
+class CondResnet(ConfigurableResNet):
     def __init__(
         self,
         block: Type[BasicResnetCondBlock],
@@ -78,6 +79,7 @@ class CondResnet(ResNet):
         width_per_group: int = 64,
         replace_stride_with_dilation: Optional[List[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
+        in_planes: int = 64
     ):
         if norm_layer is None:
             norm_layer = CondBatchNorm
@@ -89,7 +91,8 @@ class CondResnet(ResNet):
             groups=groups,
             width_per_group=width_per_group,
             replace_stride_with_dilation=replace_stride_with_dilation,
-            norm_layer=norm_layer
+            norm_layer=norm_layer,
+            in_planes=in_planes
         )
 
     def _make_layer(self, block: Type[BasicResnetCondBlock], planes: int, blocks: int,
