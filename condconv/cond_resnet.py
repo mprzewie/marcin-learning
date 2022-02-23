@@ -6,7 +6,7 @@ from torch.hub import load_state_dict_from_url
 from torchvision.models.resnet import ResNet, BasicBlock, model_urls
 
 from cond_layers import CondConv, CondBatchNorm, CondSequential
-from condconv.resnet import ConfigurableResNet
+from resnet import ConfigurableResNet
 
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
