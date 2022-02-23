@@ -201,3 +201,26 @@ class TestCondResNet(TestCase):
 
                 assert_equal(v[0, n_out:], torch.zeros_like(v[0, n_out:]))
                 assert_equal(v[0, :n_out], intermediate_full[k][0, :n_out])
+
+    def test_lukasz_marcin_approach(self):
+        img = torch.randn(size=(1, 3, 10, 10))
+        r = cond_resnet18()
+        r.eval()
+
+        n_channels = 64
+        _, intermediate_full = r(img, k=n_channels, return_intermediate=True)
+
+        emb_full = intermediate_full["embedding"]
+        for k in range(1, n_channels + 1):
+
+            k_cls, k_intermediate = r(img, k=k, return_intermediate=True)
+            emb_k = k_intermediate["embedding"]
+
+            mask = torch.ones_like(emb_full)
+            k_out = k*8
+            mask[0, k_out:] = 0
+            emb_mask = emb_full * mask
+            assert_equal(emb_mask, emb_k)
+
+            assert_equal(k_cls, r.fc(emb_k))
+            assert_equal(k_cls, r.fc(emb_mask))
