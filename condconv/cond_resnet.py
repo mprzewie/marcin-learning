@@ -155,7 +155,7 @@ class CondResnet(ConfigurableResNet):
             "layer2": l2,
             "layer3": l3,
             "layer4": l4,
-            "penultimate": penultimate
+            "embedding": penultimate
         }
         if return_intermediate:
             return x, intermediate
