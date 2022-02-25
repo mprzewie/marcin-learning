@@ -1,6 +1,8 @@
+from copy import deepcopy
 from unittest import TestCase
 
 import torch
+from torch.nn import CrossEntropyLoss
 from torch.testing import assert_equal, assert_close
 
 from cond_layers import CondConv, CondLinear, CondBatchNorm
@@ -202,7 +204,10 @@ class TestCondResNet(TestCase):
                 assert_equal(v[0, n_out:], torch.zeros_like(v[0, n_out:]))
                 assert_equal(v[0, :n_out], intermediate_full[k][0, :n_out])
 
-    def test_lukasz_marcin_approach(self):
+    def test_lukasz_marcin_approach_forward_pass(self):
+        """Test if passing image through resnet with K channels is the same as
+        zeroing out K*8 channels before the final FC layer"""
+
         img = torch.randn(size=(1, 3, 10, 10))
         r = cond_resnet18()
         r.eval()
@@ -220,7 +225,59 @@ class TestCondResNet(TestCase):
             k_out = k*8
             mask[0, k_out:] = 0
             emb_mask = emb_full * mask
-            assert_equal(emb_mask, emb_k)
 
+            assert_equal(emb_mask, emb_k)
             assert_equal(k_cls, r.fc(emb_k))
             assert_equal(k_cls, r.fc(emb_mask))
+
+
+    def test_lukasz_marcin_approach_backward_pass(self):
+        img = torch.randn(size=(2, 3, 10, 10))
+        r1 = cond_resnet18()
+        r2 = cond_resnet18()
+        r2.load_state_dict(r1.state_dict())
+
+        assert_equal(r1.fc.weight, r2.fc.weight)
+
+        r1.eval()
+        r2.eval()
+
+        ks = list(range(1, 64, 6))
+        loss_fn = CrossEntropyLoss()
+        y_true = torch.tensor([1, 2])
+
+        # marcin approach
+        loss_1 = 0
+
+        for k in ks:
+            y_pred = r1(img, k=k)
+            l = loss_fn(y_pred, y_true)
+            loss_1 += l
+
+        # lukasz approach
+        loss_2 = 0
+        _, intermediate_full = r2(img, k=64, return_intermediate=True)
+        emb_full = intermediate_full["embedding"]
+
+        for k in ks:
+            mask = torch.ones_like(emb_full)
+            k_out = k * 8
+            mask[torch.arange(len(mask)), k_out:] = 0
+            emb_mask = emb_full * mask
+            y_pred = r2.fc(emb_mask)
+            l = loss_fn(y_pred, y_true)
+            loss_2 += l
+
+        assert_equal(loss_1, loss_2)
+        loss_1.backward()
+        loss_2.backward()
+
+        for ((n1, p1), (n2, p2)) in zip(r1.named_parameters(), r2.named_parameters()):
+            self.assertEqual(n1, n2)
+            print(n1)
+            assert_equal(p1, p2)
+
+            if p1.grad is None:
+                self.assertIsNone(p2.grad)
+            else:
+                assert_close(p1.grad, p2.grad, msg=n1)
