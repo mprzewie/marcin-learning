@@ -6,7 +6,7 @@ from torch.nn import CrossEntropyLoss
 from torch.testing import assert_equal, assert_close
 
 from cond_layers import CondConv, CondLinear, CondBatchNorm
-from cond_resnet import cond_resnet18
+from cond_resnet import cond_resnet18, FC_FOR_CHANNELS, MAIN_FC_KS
 
 
 class TestCondConv(TestCase):
@@ -57,6 +57,7 @@ class TestCondConv(TestCase):
         for in_channels in [2, 4, 7]:
             for mult in [1, 2, 5, 10]:
                 self._test_cond_conv_variable_channels(in_channels, in_channels * mult)
+
 
 class TestCondLinear(TestCase):
     def test_cond_linear_same_in_out(self):
@@ -114,6 +115,7 @@ class TestCondLinear(TestCase):
         for in_features in [2, 4, 7]:
             for mult in [1, 2, 5, 10]:
                 self._test_cond_linear_var_channels(in_features, in_features * mult)
+
 
 class TestCondBatchNorm(TestCase):
 
@@ -187,12 +189,11 @@ class TestCondResNet(TestCase):
         r.eval()
 
         n_channels = 64
-        _, intermediate_full = r(img, k=n_channels, return_intermediate=True)
+        _, intermediate_full = r(img, return_intermediate=True)
 
         for n in range(1, n_channels + 1):
             _, intermediate_zero = r(img, k=n, return_intermediate=True)
             for (k, v) in intermediate_zero.items():
-
                 intermediate_n_channels = v.shape[1]
                 self.assertEqual(
                     intermediate_n_channels // n_channels,
@@ -204,6 +205,39 @@ class TestCondResNet(TestCase):
                 assert_equal(v[0, n_out:], torch.zeros_like(v[0, n_out:]))
                 assert_equal(v[0, :n_out], intermediate_full[k][0, :n_out])
 
+    def test_fc_for_channels(self):
+        img = torch.randn(size=(1, 3, 10, 10))
+        fc_for_channels = [1, 8, 10, 24, 32]
+
+        r = cond_resnet18(fc_for_channels=fc_for_channels)
+        r.eval()
+
+        n_channels = 64
+
+        _, intermediate_full = r(img, return_intermediate=True)
+
+        for n in range(1, n_channels + 1):
+            _, intermediate_zero = r(img, full_k=n, return_intermediate=True)
+            for k, v in intermediate_zero[FC_FOR_CHANNELS].items():
+                self.assertLessEqual(k, n)
+                assert_equal(
+                    intermediate_full[FC_FOR_CHANNELS][k], v
+                )
+
+    def test_main_fc_ks(self):
+        img = torch.randn(size=(1, 3, 10, 10))
+        main_fc_ks = [1, 8, 10, 24, 32]
+
+        r = cond_resnet18()
+        r.eval()
+        _, intermediate_full = r(img, return_intermediate=True, main_fc_ks=main_fc_ks)
+
+        for n in main_fc_ks:
+            out = r(img, full_k=n)
+            assert_equal(out, intermediate_full[MAIN_FC_KS][n])
+
+
+class TestLukaszMarcin(TestCase):
     def test_lukasz_marcin_approach_forward_pass(self):
         """Test if passing image through resnet with K channels is the same as
         zeroing out K*8 channels before the final FC layer"""
@@ -213,16 +247,15 @@ class TestCondResNet(TestCase):
         r.eval()
 
         n_channels = 64
-        _, intermediate_full = r(img, k=n_channels, return_intermediate=True)
+        _, intermediate_full = r(img, return_intermediate=True)
 
         emb_full = intermediate_full["embedding"]
         for k in range(1, n_channels + 1):
-
             k_cls, k_intermediate = r(img, k=k, return_intermediate=True)
             emb_k = k_intermediate["embedding"]
 
             mask = torch.ones_like(emb_full)
-            k_out = k*8
+            k_out = k * 8
             mask[0, k_out:] = 0
             emb_mask = emb_full * mask
 
@@ -230,11 +263,10 @@ class TestCondResNet(TestCase):
             assert_equal(k_cls, r.fc(emb_k))
             assert_equal(k_cls, r.fc(emb_mask))
 
-
     def test_lukasz_marcin_approach_backward_pass(self):
         img = torch.randn(size=(2, 3, 10, 10))
-        r1 = cond_resnet18()
-        r2 = cond_resnet18()
+        r1 = cond_resnet18(norm_layer=None)
+        r2 = cond_resnet18(norm_layer=None)
         r2.load_state_dict(r1.state_dict())
 
         assert_equal(r1.fc.weight, r2.fc.weight)
@@ -250,13 +282,13 @@ class TestCondResNet(TestCase):
         loss_1 = 0
 
         for k in ks:
-            y_pred = r1(img, k=k)
+            y_pred = r1(img, full_k=k)
             l = loss_fn(y_pred, y_true)
             loss_1 += l
 
         # lukasz approach
         loss_2 = 0
-        _, intermediate_full = r2(img, k=64, return_intermediate=True)
+        _, intermediate_full = r2(img, return_intermediate=True)
         emb_full = intermediate_full["embedding"]
 
         for k in ks:
@@ -274,8 +306,7 @@ class TestCondResNet(TestCase):
 
         for ((n1, p1), (n2, p2)) in zip(r1.named_parameters(), r2.named_parameters()):
             self.assertEqual(n1, n2)
-            print(n1)
-            assert_equal(p1, p2)
+            assert_equal(p1, p2, msg=n1)
 
             if p1.grad is None:
                 self.assertIsNone(p2.grad)

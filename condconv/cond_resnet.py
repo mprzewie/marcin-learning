@@ -1,4 +1,4 @@
-from typing import Optional, Callable, Type, List, Any
+from typing import Optional, Callable, Type, List, Any, Union, Dict, Tuple
 
 import torch
 from torch import nn, Tensor
@@ -7,6 +7,12 @@ from torchvision.models.resnet import ResNet, BasicBlock, model_urls
 
 from cond_layers import CondConv, CondBatchNorm, CondSequential
 from resnet import ConfigurableResNet
+
+FC_FOR_CHANNELS = "fc_for_channels" # separate fully-connected net for handling a given number of channels
+
+MAIN_FC_KS = "main_fc_ks" # an option for passing a limited number of channels through the main FC
+
+
 
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
@@ -78,8 +84,9 @@ class CondResnet(ConfigurableResNet):
         groups: int = 1,
         width_per_group: int = 64,
         replace_stride_with_dilation: Optional[List[bool]] = None,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
-        in_planes: int = 64
+        norm_layer: Optional[Callable[..., nn.Module]] = CondBatchNorm,
+        in_planes: int = 64,
+        fc_for_channels: Optional[List[int]] = None
     ):
         if norm_layer is None:
             norm_layer = CondBatchNorm
@@ -94,6 +101,11 @@ class CondResnet(ConfigurableResNet):
             norm_layer=norm_layer,
             in_planes=in_planes
         )
+
+        self.fc_for_channels = nn.ModuleDict()
+        if fc_for_channels is not None:
+            for k in fc_for_channels:
+                self.fc_for_channels[str(k)] = nn.Linear(k*8, num_classes)
 
     def _make_layer(self, block: Type[BasicResnetCondBlock], planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False) -> nn.Sequential:
@@ -135,19 +147,55 @@ class CondResnet(ConfigurableResNet):
         return CondSequential(*layers)
 
 
-    def forward(self, x: Tensor, k: int, return_intermediate: bool = False) -> Tensor:
+    def forward(
+            self,
+            x: Tensor,
+            full_k: Optional[int] = None,
+            main_fc_ks: Optional[List[int]] = None,
+            return_intermediate: bool = False
+    ) -> Union[
+        Tensor,
+        Tuple[
+            Tensor,
+            Dict[str, Union[Tensor, Dict[str, Tensor]]]
+        ]
+    ]:
+        """
+        Args:
+            x:
+            full_k: the number of channels to use in the forward pass through all the submodules
+            main_fc_ks: numbers of channels to use for forward passes through the final main FC layer
+            return_intermediate: if True, it will return a dict containing intermediate layer outputs, as well as:
+                "fc_for_channels": outputs from FC layers designed for handling a given number of channels
+                    (only if their n of channels is <=`full_k`)
+                "main_fc_ks": outputs from the main FC layer with limited number of channels
+                    the following sanity check holds:
+
+                    ```python
+                    k = ...
+                    out, intermediate = net.forward(x, full_k=k, main_fc_ks=[k])
+                    intermediate["main_fc_ks"][k] == out
+                    ```
+
+        Returns:
+
+        """
+
+        full_k = full_k or self.layer1[0].conv1.in_channels
+        main_fc_ks = main_fc_ks or []
+
         x = self.conv1(x)
-        x = self.bn1(x, k=k)
+        x = self.bn1(x, k=full_k)
         x = self.relu(x)
         x = self.maxpool(x)
 
-        l1 = x = self.layer1(x, k=k)
-        l2 = x = self.layer2(x, k=k*2)
-        l3 = x = self.layer3(x, k=k*4)
-        l4 = x = self.layer4(x, k=k*8)
+        l1 = x = self.layer1(x, k=full_k)
+        l2 = x = self.layer2(x, k=full_k * 2)
+        l3 = x = self.layer3(x, k=full_k * 4)
+        l4 = x = self.layer4(x, k=full_k * 8)
 
         x = self.avgpool(x)
-        penultimate = x = torch.flatten(x, 1)
+        embedding = x = torch.flatten(x, 1)
         x = self.fc(x)
 
         intermediate = {
@@ -155,8 +203,26 @@ class CondResnet(ConfigurableResNet):
             "layer2": l2,
             "layer3": l3,
             "layer4": l4,
-            "embedding": penultimate
+            "embedding": embedding,
+            MAIN_FC_KS: dict(),
+            FC_FOR_CHANNELS: dict()
         }
+        batch_arange = torch.arange(len(x))
+
+        for k in main_fc_ks:
+            assert k <= full_k, f"{k=} > {full_k=} which will lead to incorrect results."
+            effective_k = k * 8
+            mask = torch.ones_like(embedding)
+            mask[batch_arange, effective_k:] = 0
+            intermediate[MAIN_FC_KS][k] = self.fc(embedding * mask)
+
+        for str_k, k_fc in self.fc_for_channels.items():
+            k = int(str_k)
+            effective_k = k * 8
+            if k <= full_k:
+                intermediate[FC_FOR_CHANNELS][k] = self.fc_for_channels[str_k](embedding[batch_arange, :effective_k])
+
+
         if return_intermediate:
             return x, intermediate
 
