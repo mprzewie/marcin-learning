@@ -208,7 +208,7 @@ def main():
                     _, predicted = outputs.max(1)
                     correct += predicted.eq(targets).sum().item()
                 else:
-                    outputs, inter = net(inputs, retur_intermediate = True)
+                    _, inter = net(inputs, return_intermediate = True)
 
                     for i, (k, outputs) in enumerate(inter[FC_FOR_CHANNELS].items()):
                         loss = criterion(outputs, targets)
