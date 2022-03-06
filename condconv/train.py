@@ -1,4 +1,5 @@
 import argparse
+from collections import defaultdict
 from datetime import datetime
 from math import ceil
 from pathlib import Path
@@ -190,13 +191,17 @@ def main():
         net.eval()
 
         total = 0
-        correct = 0 if args.conditional is None else [0. for _ in args.conditional]
-        test_loss = 0 if args.conditional is None else [0. for _ in args.conditional]
+
+        # correct = 0 if args.conditional is None else [0. for _ in args.conditional]
+        # test_loss = 0 if args.conditional is None else [0. for _ in args.conditional]
+        correct = defaultdict(float)
+        test_loss = defaultdict(float)
+
         with torch.no_grad():
             for batch_idx, (inputs, targets) in tqdm(enumerate(testloader), total=len(testloader), leave=False):
                 inputs, targets = inputs.to(device), targets.to(device)
 
-                if args.conditional is None:
+                if args.model_type == "classic":
                     outputs = net(inputs)
                     loss = criterion(outputs, targets)
 
@@ -204,18 +209,24 @@ def main():
                     writer.add_scalar(f'test_loss/{args.k}', loss.item(),
                                       epoch * len(testloader) + batch_idx)
 
-                    test_loss += loss.item()
+                    test_loss[args.k] += loss.item()
                     _, predicted = outputs.max(1)
-                    correct += predicted.eq(targets).sum().item()
+                    correct[args.k] += predicted.eq(targets).sum().item()
+
                 else:
-                    _, inter = net(inputs, return_intermediate = True)
+                    if args.conditional is None:
+                        ks_to_check = sorted(set(list(range(1, args.k, 8)) + [args.k]))
+                        _, inter = net(inputs, return_intermediate = True, main_fc_ks=ks_to_check)
+                        out_key = MAIN_FC_KS
+                    else:
+                        _, inter = net(inputs, return_intermediate = True)
+                        out_key = FC_FOR_CHANNELS
 
-                    for i, (k, outputs) in enumerate(inter[FC_FOR_CHANNELS].items()):
+                    for k, outputs in inter[out_key].items():
                         loss = criterion(outputs, targets)
-                        test_loss[i] += loss.item()
-                        _, predicted = outputs[i].max(1)
-                        correct[i] += predicted.eq(targets).sum().item()
-
+                        test_loss[k] += loss.item()
+                        _, predicted = outputs.max(1)
+                        correct[k] += predicted.eq(targets).sum().item()
                         writer.add_scalar(f'test_loss/{k}', loss.item(), epoch * len(testloader) + batch_idx)
 
                 total += targets.size(0)
@@ -224,22 +235,17 @@ def main():
         writer.add_scalar('train/loss_per_epoch', train_loss, epoch)
         writer.add_scalar('train/acc_per_epoch', acc_train, epoch)
 
-        if args.conditional is None:
-            acc_test = correct / total
-            test_loss /= len(testloader)
 
-            writer.add_scalar(f'test_loss_per_epoch/{args.k}', test_loss, epoch)
-            writer.add_scalar(f'test_acc_per_epoch/{args.k}', acc_test, epoch)
-        else:
-            for i, k in enumerate(args.conditional):
-                acc_test = correct[i] / total
-                test_loss[i] /= len(testloader)
+        for k, v in correct.items():
+            acc_test = correct[k] / total
+            test_loss[k] /= len(testloader)
 
-                writer.add_scalar(f'test_loss_per_epoch/{k}', test_loss[i], epoch)
-                writer.add_scalar(f'test_acc_per_epoch/{k}', acc_test, epoch)
+            writer.add_scalar(f'test_loss_per_epoch/{k}', test_loss[k], epoch)
+            writer.add_scalar(f'test_acc_per_epoch/{k}', acc_test, epoch)
 
-            test_loss = test_loss[-1]
 
+        acc_test = correct[max(correct.keys())] / total
+        test_loss = sum(test_loss.values())
         ############################
         #         Save model       #
         ############################
