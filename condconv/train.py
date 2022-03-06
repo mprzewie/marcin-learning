@@ -83,7 +83,7 @@ def main():
         else:
             print(f'\033[0;1;33mConditional {args.model} with one head (k={args.k})\033[0m')
             net = cond_resnet18(in_planes=args.k)
-            args.save_dir = f"{args.save_dir}/cond{args.model}-{args.k}-1-Head-{args.k}{'-useLast' if args.useLast else ''}"
+            args.save_dir = f"{args.save_dir}/cond{args.model}-{args.k}-1-Head{'-useLast' if args.useLast else ''}"
 
     net = net.to(device)
     # if device == 'cuda':
@@ -201,7 +201,7 @@ def main():
                     loss = criterion(outputs, targets)
 
                     # ===================logger========================
-                    writer.add_scalar(f'test_loss/{net.fc.in_features}', loss.item(),
+                    writer.add_scalar(f'test_loss/{args.k}', loss.item(),
                                       epoch * len(testloader) + batch_idx)
 
                     test_loss += loss.item()
@@ -228,8 +228,8 @@ def main():
             acc_test = correct / total
             test_loss /= len(testloader)
 
-            writer.add_scalar(f'test_loss_per_epoch/{net.fc.in_features}', test_loss, epoch)
-            writer.add_scalar(f'test_acc_per_epoch/{net.fc.in_features}', acc_test, epoch)
+            writer.add_scalar(f'test_loss_per_epoch/{args.k}', test_loss, epoch)
+            writer.add_scalar(f'test_acc_per_epoch/{args.k}', acc_test, epoch)
         else:
             for i, k in enumerate(args.conditional):
                 acc_test = correct[i] / total
