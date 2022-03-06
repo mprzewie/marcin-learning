@@ -149,10 +149,11 @@ def main():
             else:
                 if args.conditional is None:
                     samples = np.arange(1, args.k)
-                    np.random.shuffle(samples)
+                    # np.random.shuffle(samples)
                     # n_samples = 10
                     # samples = samples[:n_samples]
                     # TODO: ???
+                    samples = list(samples) + [args.k]
                     loss = 0
 
                     _, inter = net(inputs, return_intermediate=True, main_fc_ks=samples)
