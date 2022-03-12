@@ -31,11 +31,19 @@ class ConfigurableResNet(ResNet):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
+
+        # TODO marcin / lukasz diff #1
+        # self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
+        #                        bias=False)
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1,
                                bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        # TODO marcin / lukasz diff #2
+        # self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.maxpool = nn.Sequential()
+
         self.layer1 = self._make_layer(block, in_planes, layers[0])
         self.layer2 = self._make_layer(block, in_planes*2, layers[1], stride=2,
                                        dilate=replace_stride_with_dilation[0])

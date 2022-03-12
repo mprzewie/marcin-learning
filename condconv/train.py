@@ -22,6 +22,7 @@ from tqdm import tqdm
 # from models import resnet_condconv2d as cond_models
 from cond_resnet import cond_resnet18, MAIN_FC_KS, FC_FOR_CHANNELS
 from resnet import resnet18
+# from resnet_regular_lukasz import ResNet18 as LukaszResnet18
 
 def main():
     parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
@@ -32,10 +33,11 @@ def main():
     parser.add_argument('--save_dir', default='./results', help='Directory where results will be save')
     parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
     parser.add_argument("--model_type", default="classic", choices=["classic", "conditional"])
+    parser.add_argument("--inplanes", default=64, type=int, help="ResNet inplanes")
     parser.add_argument('--conditional', '-c', nargs='+', type=float, default=None,
-                        help='Use conditional Conv2d layers and how many output channels will be used during the test model')
-    parser.add_argument('--k', default=64, type=int, help='Number of conditions')
-    parser.add_argument('--useLast', action='store_true', help='Use original loss (all channels) in conditional model')
+                        help="Train separate ResNet heads for specific numbers of channels."
+                             "If not specified, one robust head will be trained")
+    parser.add_argument('--k', default=None, type=int, help='Number of condition samples for one robust head.')
     parser.add_argument('--scheduler', choices=['None', 'CyclicLR', 'LambdaLR'], default='CyclicLR')
     parser.add_argument('--model', choices=[
         'ResNet18',
@@ -68,28 +70,28 @@ def main():
 
     # Model
     print('==> Building model..')
+
+    model_str = f"{args.model_type}_{args.model}-inplanes_{args.inplanes}"
     if args.model_type == "classic":
-        assert args.conditional is None
-        print(f'\033[0;1;33mOriginal {args.model}\033[0m')
-        # net = getattr(models, args.model)()
-        net = resnet18(in_planes=args.k)
-        args.save_dir = f"{args.save_dir}/{args.model}-{args.k}"
+        assert args.conditional is None and args.k is None
+        net = resnet18(in_planes=args.inplanes, num_classes=10)
     else:
         if args.conditional is not None:
-            args.conditional = [ceil(args.k * i) if i <= 1 else int(i) for i in args.conditional]
-            print(f'\033[0;1;33mConditional {args.model} with multiple heads: {args.conditional}')
-            net = cond_resnet18(in_planes=args.k, fc_for_channels=args.conditional)
-            args.save_dir = f"{args.save_dir}/cond{args.model}-{args.k}-N={len(args.conditional)}-Heads{'-useLast' if args.useLast else ''}"
+            assert args.k is None
+            args.conditional = [ceil(args.inplanes * i) if i <= 1 else int(i) for i in args.conditional]
+            model_str = f"{model_str}-{len(args.conditional)}_heads"
+            net = cond_resnet18(in_planes=args.inplanes, fc_for_channels=args.conditional)
 
         else:
-            print(f'\033[0;1;33mConditional {args.model} with one head (k={args.k})\033[0m')
-            net = cond_resnet18(in_planes=args.k)
-            args.save_dir = f"{args.save_dir}/cond{args.model}-{args.k}-1-Head{'-useLast' if args.useLast else ''}"
+            assert args.k is not None
+            model_str = f"{model_str}-robust_head_{args.k}_samples"
+            net = cond_resnet18(in_planes=args.inplanes)
+
+    print(f'\033[0;1;33m{model_str}\033[0m')
+
+    args.save_dir = f"{args.save_dir}/{model_str}"
 
     net = net.to(device)
-    # if device == 'cuda':
-    #     net = torch.nn.DataParallel(net)
-    #     cudnn.benchmark = True
 
     if args.resume:
         # Load checkpoint.
@@ -101,10 +103,8 @@ def main():
         start_epoch = checkpoint['epoch']
 
     criterion = nn.CrossEntropyLoss()
-    # optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     optimizer = optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0)
 
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     if args.scheduler == 'CyclicLR':
         scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-4, max_lr=1.2 * args.lr, step_size_up=10,
                                                       mode="exp_range", scale_mode='cycle', cycle_momentum=False,
@@ -142,19 +142,17 @@ def main():
         for batch_idx, (inputs, targets) in tqdm(enumerate(trainloader), total=len(trainloader), leave=False):
             inputs, targets = inputs.to(device), targets.to(device)
 
-            if args.model_type == "classic":
+            if args.model_type in ["classic"]:
 
                 outputs = net(inputs)
                 loss = criterion(outputs, targets)
 
             else:
                 if args.conditional is None:
-                    samples = np.arange(1, args.k)
-                    # np.random.shuffle(samples)
-                    # n_samples = 10
-                    # samples = samples[:n_samples]
-                    # TODO: ???
-                    samples = list(samples) + [args.k]
+                    samples = np.arange(1, args.inplanes)
+                    np.random.shuffle(samples)
+                    samples = samples[:args.k]
+                    samples = list(samples) + [args.inplanes]
                     loss = 0
 
                     _, inter = net(inputs, return_intermediate=True, main_fc_ks=samples)
@@ -201,7 +199,7 @@ def main():
             for batch_idx, (inputs, targets) in tqdm(enumerate(testloader), total=len(testloader), leave=False):
                 inputs, targets = inputs.to(device), targets.to(device)
 
-                if args.model_type == "classic":
+                if args.model_type in ["classic"]:
                     outputs = net(inputs)
                     loss = criterion(outputs, targets)
 
@@ -215,7 +213,7 @@ def main():
 
                 else:
                     if args.conditional is None:
-                        ks_to_check = sorted(set(list(range(1, args.k, 8)) + [args.k]))
+                        ks_to_check = sorted(set(list(range(1, args.inplanes, 8)) + [args.inplanes]))
                         _, inter = net(inputs, return_intermediate = True, main_fc_ks=ks_to_check)
                         out_key = MAIN_FC_KS
                     else:
