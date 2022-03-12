@@ -78,7 +78,11 @@ def main():
     else:
         if args.conditional is not None:
             assert args.k is None
-            args.conditional = [ceil(args.inplanes * i) if i <= 1 else int(i) for i in args.conditional]
+            if any([i < 1 for i in args.conditional]):
+                args.conditional = [ceil(args.inplanes * i) for i in args.conditional]
+            else:
+                args.conditional = [int(i) for i in args.conditional]
+
             model_str = f"{model_str}-{len(args.conditional)}_heads"
             net = cond_resnet18(in_planes=args.inplanes, fc_for_channels=args.conditional)
 
