@@ -237,7 +237,6 @@ def main():
         writer.add_scalar('train/loss_per_epoch', train_loss, epoch)
         writer.add_scalar('train/acc_per_epoch', acc_train, epoch)
 
-        assert False, correct.keys()
         for n_channels, v in correct.items():
             acc_test = correct[n_channels] / total
             test_loss[n_channels] /= len(testloader)
