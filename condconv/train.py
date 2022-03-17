@@ -71,7 +71,7 @@ def main():
     # Model
     print('==> Building model..')
 
-    model_str = f"{args.model_type}_{args.model}-inplanes_{args.inplanes}"
+    model_str = f"{args.model_type}_{args.model}-{args.inplanes}_inplanes"
     if args.model_type == "classic":
         assert args.conditional is None and args.k is None
         net = resnet18(in_planes=args.inplanes, num_classes=10)
@@ -160,13 +160,13 @@ def main():
                     loss = 0
 
                     _, inter = net(inputs, return_intermediate=True, main_fc_ks=samples)
-                    for k, outputs in inter[MAIN_FC_KS].items():
+                    for n_channels, outputs in inter[MAIN_FC_KS].items():
                         loss += criterion(outputs, targets)
 
                 else:
                     _, inter = net(inputs, return_intermediate=True)
                     loss = 0
-                    for k, outputs in inter[FC_FOR_CHANNELS].items():
+                    for n_channels, outputs in inter[FC_FOR_CHANNELS].items():
                         loss += criterion(outputs, targets)
 
             optimizer.zero_grad(True)
@@ -211,9 +211,9 @@ def main():
                     writer.add_scalar(f'test_loss/{args.k}', loss.item(),
                                       epoch * len(testloader) + batch_idx)
 
-                    test_loss[args.k] += loss.item()
+                    test_loss[args.inplanes] += loss.item()
                     _, predicted = outputs.max(1)
-                    correct[args.k] += predicted.eq(targets).sum().item()
+                    correct[args.inplanes] += predicted.eq(targets).sum().item()
 
                 else:
                     if args.conditional is None:
@@ -224,12 +224,12 @@ def main():
                         _, inter = net(inputs, return_intermediate = True)
                         out_key = FC_FOR_CHANNELS
 
-                    for k, outputs in inter[out_key].items():
+                    for n_channels, outputs in inter[out_key].items():
                         loss = criterion(outputs, targets)
-                        test_loss[k] += loss.item()
+                        test_loss[n_channels] += loss.item()
                         _, predicted = outputs.max(1)
-                        correct[k] += predicted.eq(targets).sum().item()
-                        writer.add_scalar(f'test_loss/{k}', loss.item(), epoch * len(testloader) + batch_idx)
+                        correct[n_channels] += predicted.eq(targets).sum().item()
+                        writer.add_scalar(f'test_loss/{n_channels}', loss.item(), epoch * len(testloader) + batch_idx)
 
                 total += targets.size(0)
 
@@ -237,13 +237,13 @@ def main():
         writer.add_scalar('train/loss_per_epoch', train_loss, epoch)
         writer.add_scalar('train/acc_per_epoch', acc_train, epoch)
 
+        assert False, correct.keys()
+        for n_channels, v in correct.items():
+            acc_test = correct[n_channels] / total
+            test_loss[n_channels] /= len(testloader)
 
-        for k, v in correct.items():
-            acc_test = correct[k] / total
-            test_loss[k] /= len(testloader)
-
-            writer.add_scalar(f'test_loss_per_epoch/{k}', test_loss[k], epoch)
-            writer.add_scalar(f'test_acc_per_epoch/{k}', acc_test, epoch)
+            writer.add_scalar(f'test_loss_per_epoch/{n_channels}', test_loss[n_channels], epoch)
+            writer.add_scalar(f'test_acc_per_epoch/{n_channels}', acc_test, epoch)
 
 
         acc_test = correct[max(correct.keys())] / total
