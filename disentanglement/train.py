@@ -222,7 +222,10 @@ def train(
         test_metrics["best_accuracy"] = best_accuracy
 
         test_metrics.update(train_metrics)
-        ### TODO load to wandb
+
+        if wandb.run is not None:
+            wandb.log(test_metrics)
+        print(epoch, " | ".join([f"{k}: {v}" for (k, v) in test_metrics]))
 
         metrics_list.append(test_metrics)
 
@@ -337,7 +340,7 @@ def activations_visualization(
 
     # print(mn.shape)
 
-    for c in sorted(list(set(targets))):  # todo check all
+    for c in sorted(list(set(targets))):
         index = activations["y_true"] == c
         c_acts = activations[index]
 
@@ -479,11 +482,8 @@ def main(args):
                     )
                 )
 
-
-
-
-
-
+    if wandb.run is not None:
+        wandb.log(analysis_metrics)
 
 
 
