@@ -82,7 +82,8 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
     def __init__(
-        self, block, num_blocks, num_classes=10, detach_residual: bool = False
+        self, block, num_blocks, num_classes=10, detach_residual: bool = False,
+        dropout: float = 0, cls_len: int = 1
     ):
         super(ResNet, self).__init__()
         self.in_planes = 64
@@ -95,7 +96,21 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
-        self.linear = nn.Linear(512*block.expansion, num_classes)
+        
+        if cls_len > 1:
+            linear_seq = []
+            for i in range(cls_len - 1):
+                linear_seq.extend([nn.Linear(512*block.expansion, 512*block.expansion), nn.ReLU()])
+            linear_seq.append(nn.Linear(512*block.expansion, num_classes))
+            self.linear = nn.Sequential(*linear_seq)
+        else:
+            self.linear = nn.Linear(512*block.expansion, num_classes)
+        
+        self.d1 = nn.Dropout(dropout)
+        self.d2 = nn.Dropout(dropout)
+        self.d3 = nn.Dropout(dropout)
+        self.d4 = nn.Dropout(dropout)
+
 
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1]*(num_blocks-1)
@@ -108,12 +123,12 @@ class ResNet(nn.Module):
     def forward(self, x, return_activations=False):
         c1 = out = F.relu(self.bn1(self.conv1(x)))
         l1 = out = self.layer1(out)
-        l2 = out = self.layer2(out)
-        l3 = out = self.layer3(out)
-        l4 = out = self.layer4(out)
+        l2 = out = self.layer2(self.d1(out))
+        l3 = out = self.layer3(self.d2(out))
+        l4 = out = self.layer4(self.d3(out))
         out = F.avg_pool2d(out, 4)
         pool = out = out.view(out.size(0), -1)
-        out = self.linear(out)
+        out = self.linear(self.d4(out))
         
         if return_activations:
             return dict(
@@ -128,8 +143,8 @@ class ResNet(nn.Module):
         return out
 
 
-def ResNet18(num_classes: int = 10, detach_residual=False):
-    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes,detach_residual=detach_residual)
+def ResNet18(num_classes: int = 10, detach_residual: bool = False, dropout: float = 0, cls_len: int = 1):
+    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes,detach_residual=detach_residual, dropout=dropout, cls_len=cls_len)
 
 
 def ResNet34(num_classes: int = 10):

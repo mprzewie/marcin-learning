@@ -26,9 +26,14 @@ import seaborn as sns
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+import random
+
+from dataclasses import dataclass
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device
+
+
 
 
 NUM_CLASSES = 100
@@ -42,6 +47,38 @@ class Actions:
     eval_linear = "eval-linear"
     eval_collapse = "eval-collapse"
     visualize_activations = "vis-activations"
+    visaualize_feature_activations = "vis-feat-acts"
+    visualize_kld = "vis-kld"
+
+class EntropyOps:
+    qsuare = "qsuare"
+    add_min = "add-min"
+    softmax = "softmax"
+    normalize = "normalize"
+    
+
+def mean_class_activations(
+    activations,
+    targets,
+    normalization=None,
+    temperature=1
+):
+    oh_targets = torch.zeros(len(targets), targets.max()+1).to(activations.device)
+    oh_targets[torch.arange(len(targets)), targets] = 1
+    oh_targets = torch.nn.functional.normalize(oh_targets, p=1, dim=0)
+
+    mean_activations = oh_targets.T @ activations
+    
+    if normalization == EntropyOps.softmax:
+        mean_activations = torch.softmax(mean_activations / temperature, dim=1)
+    elif normalization == EntropyOps.normalize:
+        mean_activations = mean_activations ** temperature
+        a_sum = mean_activations.sum(dim=1)
+        mean_activations = (mean_activations.T / a_sum ).T
+    
+    
+    return mean_activations
+    
 
 def get_dataloaders(
     cutoff_class: int,
@@ -97,45 +134,183 @@ def get_dataloaders(
         DataSplits.all_classes: (trainloader_12, testloader_12)
     }
 
+
+def entropy_losses(
+    block_representations: Dict[str, torch.Tensor],
+    targets: torch.Tensor,
+    temperature: float,
+    ops: List[str],
+) -> Dict[str, torch.Tensor]:
+    
+    assert (("softmax" in ops) != ("normalize" in ops)), ops
+    
+    result = dict()
+    
+    relevant_blocks = ["l1", "l2", "l3", "l4"]
+    block_representations = {
+        k: block_representations[k].mean(axis=(2,3))
+        for k in relevant_blocks
+    }
+    
+    for block, activations in block_representations.items():
+        for axis in [0, 1]:
+            for op in ops:
+                if op == EntropyOps.qsuare:
+                    activations = activations ** 2
+                if op == EntropyOps.add_min:
+                    min_act, _ = activations.min(dim=1)
+                    activations = (activations - min_act.unsqueeze(dim=1)) + 1e-6
+                    
+                if op == EntropyOps.softmax:
+                    activations = torch.nn.functional.softmax(
+                        activations / temperature, 
+                        dim=axis
+                    )
+                if op == EntropyOps.normalize:
+                    activations = activations ** temperature
+                    a_sum = activations.sum(dim=axis)
+                    if axis == 0:
+                        activations = activations / a_sum
+                    elif axis == 1:
+                        activations = (activations.T / a_sum ).T
+                    else:
+                        assert False, axis
+                    
+            assert 0 <= activations.min() <= activations.max() <= 1, (activations.min(), activations.max())
+                
+            neg_b_repr_entropy = activations * activations.log()
+            b_ent = neg_b_repr_entropy.sum(dim=axis).mean()
+            result[f"{axis}/{block}"] = b_ent
+    
+    return result
+
+
+def inter_class_kld(
+    activations: torch.Tensor,
+    targets: torch.Tensor,
+    temperature: float,
+    normalization: str,
+    epsilon: float = 1e-6,
+    drop_missing: bool = False
+):
+    per_class_acts = mean_class_activations(
+        activations, targets,
+        normalization=normalization,
+        temperature=temperature,
+    )
+    if drop_missing:
+        per_class_acts = per_class_acts[
+            sorted(set(targets.detach().cpu().numpy()))
+        ]
+    
+    per_class_acts = per_class_acts - per_class_acts.min()
+    
+    # assert not (torch.any(torch.isnan(per_class_acts)))
+    
+    b, f = per_class_acts.shape
+    
+    logdivs = torch.einsum(
+        "np,mp->nmp",
+        [
+            (per_class_acts + epsilon), 
+            1/(per_class_acts + epsilon)
+        ]
+    ).log()
+    
+    r = (per_class_acts.reshape(b, 1, f) * logdivs).sum(dim=2)
+    
+#     assert not (torch.any(torch.isnan(per_class_acts))), "pca"
+#     assert not (torch.any(torch.isnan(logdivs))), "logdivs"
+
+#     assert not (torch.any(torch.isnan(r))), (
+#         "result", 
+#         (per_class_acts.min(), per_class_acts.max()),
+#         (logdivs.min(), logdivs.max()),
+#         (r.min(), r.max())
+#     )
+        
+    return r
+    
+    
+        
+        
+
 def train_epoch(
     epoch: int,
     model: ResNet,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    entropy_lambda: float
+    entropy_temperature: float,
+    entropy_lambda: float,
+    ent_blocks: List[str],
+    ent_axis: int,
+    ent_ops: List[str],
+    kld_lambda: float,
+    kld_share: float,
+    kld_norm: str,
+    kld_blocks: List[str],
 ):
     model.train()
     criterion = nn.CrossEntropyLoss()
 
     train_loss = 0
-    train_entropy_loss = 0
     correct = 0
     total = 0
+    train_entropy_losses = defaultdict(float)
+    train_kld_losses = defaultdict(float)
+    
+    effective_loss = 0
 
     for batch_idx, (inputs, targets) in tqdm(enumerate(loader), desc=f"{epoch}: training"):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs, return_activations=True)
-
-        l3_representations = outputs["l3"].mean(axis=(2, 3))
-
-        #########
-        # TODO entropy experiments
-
-        l3_softmax = torch.nn.functional.softmax(l3_representations, dim=1)
-        neg_l3_entropy = l3_softmax * l3_softmax.log()
-        # entropy would have a minus sign, but I want to maximize entropy, so I need to minimize negative-entropy
-        entropy_loss = neg_l3_entropy.sum(dim=1).mean()
-
-        #########
-
         logits = outputs["out"]
         loss = criterion(logits, targets)
-        (loss + (entropy_lambda * entropy_loss)).backward()
-        optimizer.step()
+        loss_and_entropy = loss
 
+        ########
+        ent_losses = entropy_losses(outputs, targets, temperature=entropy_temperature, ops=ent_ops)
+        for k, v in ent_losses.items():
+            train_entropy_losses[f"entropy/train/{k}"] += v.item()
+        
+        for b in ent_blocks:
+            ent_loss_key = f"{ent_axis}/{b}"
+            loss_and_entropy = loss_and_entropy + (entropy_lambda * ent_losses[ent_loss_key])
+        
+
+        #########
+        
+        kld_losses = dict()
+        
+        for b in ["l1", "l2", "l3", "l4"]:
+            ikld = inter_class_kld(
+                outputs[b].mean(axis=(2,3)), 
+                targets=targets, drop_missing=True, normalization=kld_norm, temperature=1.0
+            )
+            ikld_sorted = sorted(ikld.detach().cpu().numpy().reshape(-1))
+            thresh_elem = int((len(ikld_sorted) -1) * kld_share)
+            thresh = ikld_sorted[thresh_elem]
+            ikld = ikld * (ikld < thresh)
+            kld_losses[f"kld/train/{b}"] = ikld.sum().item()
+            kld_losses[f"kld/thresh/{b}"] = thresh
+            
+            if kld_lambda != 0:
+                if b in kld_blocks:
+                    loss_and_entropy = loss_and_entropy + (kld_lambda * ikld.sum())
+            
+        for k, v in kld_losses.items():
+            train_kld_losses[k] += v
+        
+        #########
+
+        
+        
+        (loss_and_entropy).backward()
+        optimizer.step()
+        
+        effective_loss += loss_and_entropy.item()
         train_loss += loss.item()
-        train_entropy_loss += entropy_loss.item()
         _, predicted = logits.max(1)
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
@@ -143,8 +318,16 @@ def train_epoch(
     return {
         "epoch": epoch,
         "loss/train": train_loss / (batch_idx + 1),
-        "loss_entropy/train": train_entropy_loss / (batch_idx + 1),
-        "accuracy/train": 100. * correct / total
+        "loss/effective": effective_loss / (batch_idx + 1),
+        "accuracy/train": 100. * correct / total,
+        **{
+            k: (v  / (batch_idx + 1))
+            for (k,v) in train_entropy_losses.items()
+        },
+        **{
+            k: (v  / (batch_idx + 1))
+            for (k,v) in train_kld_losses.items()
+        },
     }
 
 def test_epoch(
@@ -183,8 +366,17 @@ def train(
     num_epochs: int,
     lr: float,
     weight_decay: float,
+    entropy_temperature: float,
     entropy_lambda: float,
+    ent_blocks: List[str],
+    ent_axis: int,
+    ent_ops: List[str],
+    kld_lambda: float,
+    kld_share: float,
+    kld_norm: str,
+    kld_blocks: List[str],
 ) -> List[Dict[str, float]]:
+    
     metrics_list = []
     optimizer = optim.SGD(
         model.parameters(), lr=lr,
@@ -199,7 +391,16 @@ def train(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
-            entropy_lambda=entropy_lambda
+            entropy_lambda=entropy_lambda,
+            entropy_temperature=entropy_temperature,
+            ent_blocks=ent_blocks,
+            ent_axis=ent_axis,
+            ent_ops=ent_ops,
+            kld_lambda=kld_lambda,
+            kld_share=kld_share,
+            kld_norm=kld_norm,
+            kld_blocks=kld_blocks
+            
         )
         scheduler.step()
         test_metrics = test_epoch(
@@ -209,9 +410,9 @@ def train(
         )
 
 
-        if test_metrics["acc"] > best_accuracy:
-            print(f"Best acc increased from {best_accuracy:.2f} to {test_metrics['acc']:.f}. Saving.")
-            best_accuracy = test_metrics["acc"]
+        if test_metrics["accuracy/test"] > best_accuracy:
+            print(f"Best acc increased from {best_accuracy:.2f} to {test_metrics['accuracy/test']:.2f}. Saving.")
+            best_accuracy = test_metrics["accuracy/test"]
             state = {
                 'net': model.state_dict(),
                 'acc': best_accuracy,
@@ -219,13 +420,13 @@ def train(
             }
             torch.save(state, experiment_dir / "ckpt.pth")
 
-        test_metrics["best_accuracy"] = best_accuracy
+        test_metrics["accuracy/best"] = best_accuracy
 
         test_metrics.update(train_metrics)
 
         if wandb.run is not None:
             wandb.log(test_metrics)
-        print(epoch, " | ".join([f"{k}: {v}" for (k, v) in test_metrics]))
+        print(epoch, " | ".join(sorted([f"{k}: {v:.2f}" for (k, v) in test_metrics.items()])))
 
         metrics_list.append(test_metrics)
 
@@ -288,7 +489,7 @@ def get_detached_activations(model: ResNet, loader: DataLoader) -> Dict[str, tor
             acts["y_true"].extend(targets.detach())
 
         return {
-            k: np.array(v)
+            k: torch.stack(v)
             for (k,v) in acts.items()
         }
 
@@ -313,7 +514,7 @@ def collapse_eval(
     per_class_results = []
 
     for cls in list(set(targets)):
-        index = np.array(activations["y_true"]) == cls
+        index = targets == cls
         c_fts = activations[index]
         pca = PCA().fit(c_fts)
         exp_var = pca.explained_variance_ratio_
@@ -340,17 +541,21 @@ def activations_visualization(
 
     # print(mn.shape)
 
-    for c in sorted(list(set(targets))):
-        index = activations["y_true"] == c
+    for c in sorted(list(set(targets.detach().cpu().numpy().tolist()))):
+        index = targets == c
         c_acts = activations[index]
+        
+        # assert False, (c, c_acts.shape,  (c_acts.mean(axis=0) - mn).shape)
 
         per_class_acts.append(
             c_acts.mean(axis=0) - mn
         )
+    
+    mp = torch.stack(per_class_acts).detach().cpu().numpy()
+    
+    # assert False, (len(per_class_acts), mp.shape)
 
-    mp = np.array(per_class_acts)
-
-
+    plt.figure()
     heatmap = sns.heatmap(mp)
     plt.ylabel("class")
     plt.xlabel("features")
@@ -358,6 +563,66 @@ def activations_visualization(
 
     return heatmap.get_figure()
 
+def activations_sorted_for_each_feature_visualization(
+    activations: torch.Tensor,
+    targets: torch.Tensor,
+    temperature: float,
+    normalization: str,
+    title: str,
+) -> np.ndarray:
+    
+    per_class_acts = mean_class_activations(
+        activations, targets, 
+        normalization=normalization,
+        temperature=temperature,
+    )
+    
+    
+    mp = per_class_acts.detach().cpu().numpy().T
+    
+    mp = np.array([
+        sorted(r, reverse=True)
+        for r in mp
+    ])
+    
+    sorted_rows = np.array(sorted(np.arange(len(mp)), key=lambda i: mp[i].sum(), reverse=True)).astype(int)
+    
+    
+    mp = mp[sorted_rows].T
+
+    plt.figure()
+    heatmap = sns.heatmap(mp)
+    plt.ylabel("classes (sorted individually in\neach column by activation strength)")
+    plt.xlabel("features (sorted by sum of mean activations in classes)")
+    plt.title(title, fontsize="small")
+    locs, labels = plt.xticks()
+    
+    plt.xticks(locs, sorted_rows[[int(l) for l in locs]])
+    return heatmap.get_figure()
+
+
+def kld_heatmap_visualization(
+    activations: torch.Tensor,
+    targets: torch.Tensor,
+    title: str,
+    temperature: float,
+    normalization: str,
+) -> np.ndarray:
+    
+    with torch.no_grad():
+        kld = inter_class_kld(activations, targets, temperature=temperature, normalization=normalization).cpu().numpy()
+    
+    
+    plt.figure()
+    heatmap = sns.heatmap(kld)
+    plt.ylabel("P in DKL(P || Q)")
+    plt.xlabel("Q in DKL(P || Q)")
+    plt.title(title, fontsize="small")
+    
+    return heatmap.get_figure()
+
+    
+    
 def maybe_setup_wandb(logdir, args=None, run_name_suffix=None, **init_kwargs):
 
     wandb_entity = os.environ.get("WANDB_ENTITY")
@@ -398,12 +663,29 @@ def maybe_setup_wandb(logdir, args=None, run_name_suffix=None, **init_kwargs):
     print("WANDB run", wandb.run.id, new_run_name, origin_run_name)
 
 def main(args):
+    
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        torch.random.manual_seed(args.seed)
+        random.seed(args.seed)
 
-    run_name = f"resnet18_cc{args.cutoff_class}_bs{args.batch_size}_dr{str(args.detach_residual)[0]}_lr{args.lr}_wd{args.weight_decay}_elbd{args.ent_lambda}"
-
+    run_name = f"resnet18_e{args.epochs}_cc{args.cutoff_class}_bs{args.batch_size}_dr{str(args.detach_residual)[0]}_cl{args.cls_len}_lr{args.lr}_wd{args.weight_decay}_d{args.dropout}_e-lbd{args.ent_lambda}_t{args.ent_temperature}_b-{'-'.join(args.ent_blocks)}_o-{'-'.join([o[0] for o in args.ent_ops])}_a{args.ent_axis}_kl{args.kld_lambda}_ks{args.kld_share}_kn{str(args.kld_norm)[0]}_kb{'-'.join(args.kld_blocks)}_s{args.seed}"
+    
+    if args.suffix is not None:
+        run_name += f"_{args.suffix}"
+        
     experiment_dir = args.save_dir / run_name
+    
+    if Actions.train in args.actions:
+        if (experiment_dir / "ckpt.pth").exists():
+            print("warning - checkpoint exists, I will overwrite it!")
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        assert experiment_dir.exists(), experiment_dir
 
-    maybe_setup_wandb(logdir=experiment_dir, args=args)
+    maybe_setup_wandb(
+        logdir=experiment_dir, args=args
+    )
 
     dataloaders = get_dataloaders(
         cutoff_class=args.cutoff_class,
@@ -411,7 +693,7 @@ def main(args):
         num_workers=args.num_workers
     )
 
-    net = ResNet18(num_classes=NUM_CLASSES, detach_residual=args.detach_residual)
+    net = ResNet18(num_classes=NUM_CLASSES, detach_residual=args.detach_residual, dropout=args.dropout, cls_len=args.cls_len)
 
     # TODO - loading / restarting experiment logic
     net = net.to(device)
@@ -427,7 +709,17 @@ def main(args):
             num_epochs=args.epochs,
             lr=args.lr,
             weight_decay=args.weight_decay,
-            entropy_lambda=args.ent_lambda
+            experiment_dir=experiment_dir,
+            entropy_temperature=args.ent_temperature,
+            entropy_lambda=args.ent_lambda,
+            ent_blocks=args.ent_blocks,
+            ent_axis=args.ent_axis,
+            ent_ops=args.ent_ops,
+            kld_lambda=args.kld_lambda,
+            kld_share=args.kld_share,
+            kld_norm=args.kld_norm,
+            kld_blocks=args.kld_blocks
+            
         )
 
 
@@ -435,62 +727,93 @@ def main(args):
     net.load_state_dict(checkpoint["net"], strict=True)
     net.eval()
 
-    analysis_metrics = dict()
-
     for set_name, (trainloader, testloader) in dataloaders.items():
 
         train_activations = get_detached_activations(model=net, loader=trainloader)
         test_activations = get_detached_activations(model=net, loader=testloader)
 
-        for acts in [train_activations, test_activations]:
-            print({
-                k: v.shape
-                for (k,v) in acts.items()
-            })
+        
+        for i, block in enumerate(
+            ["l1", "l2", "l3", "l4"]
+        ):
+            analysis_metrics = dict(
+                resnet_block=i+1
+            )
 
-        if Actions.eval_linear in args.actions:
-            for block in ["l4", "l3"]:
+            
+            if Actions.eval_linear in args.actions:
                 block_accuracy = linear_eval(
                     train_activations=train_activations[block],
                     train_targets=train_activations["y_true"],
                     test_activations=test_activations[block],
                     test_targets=test_activations["y_true"]
                 )
-                analysis_metrics[f"linear_eval/{set_name}/{block}"] = block_accuracy
+                analysis_metrics[f"linear_eval/{set_name}"] = block_accuracy
 
-        if Actions.eval_collapse in args.actions:
-            for block in ["l1", "l2", "l3", "l4"]:
+            if Actions.eval_collapse in args.actions:
                 block_collapse_metrics = collapse_eval(
                     activations=test_activations[block],
                     targets=test_activations["y_true"]
                 )
                 for k, v in block_collapse_metrics.items():
-                    analysis_metrics[f"collapse/{k}/{set_name}/{block}"] = v
+                    analysis_metrics[f"collapse/{k}/{set_name}"] = v
 
-        if Actions.visualize_activations in args.actions:
-            for block in ["l1", "l2", "l3", "l4"]:
-                ttl = f"activations/{set_name}/{block}"
+            if Actions.visualize_activations in args.actions:
+                ttl = f"activations/{set_name}"
                 visualization = activations_visualization(
                     activations=test_activations[block],
                     targets=test_activations["y_true"],
-                    title=ttl
+                    title=f"{run_name}\n{ttl}/{block}"
                 )
                 analysis_metrics[ttl] = wandb.Image(
                     wandb.Image(
                         visualization,
-                        caption=ttl
+                        caption=f"{ttl}/{block}"
                     )
                 )
+            if Actions.visaualize_feature_activations in args.actions:
+                for normalization in [None, EntropyOps.softmax, EntropyOps.normalize]:
+                    ttl = f"activations_sorted_for_features/{normalization}/{set_name}"
+                    visualization = activations_sorted_for_each_feature_visualization(
+                        activations=test_activations[block],
+                        targets=test_activations["y_true"],
+                        title=f"{run_name}\n{ttl}/{block}",
+                        temperature=args.ent_temperature,
+                        normalization=normalization,
+                    )
+                    analysis_metrics[ttl] = wandb.Image(
+                        wandb.Image(
+                            visualization,
+                            caption=f"{ttl}/{block}"
+                        )
+                    )
+                
+            if Actions.visualize_kld in args.actions:
+                for normalization in [None, EntropyOps.softmax, EntropyOps.normalize]:
+                    ttl = f"inter_class_kld/{normalization}/{set_name}"
+                    visualization = kld_heatmap_visualization(
+                        activations=test_activations[block],
+                        targets=test_activations["y_true"],
+                        title=f"{run_name}\n{ttl}/{block} ({args.ent_temperature:.2f})",
+                        temperature=args.ent_temperature,
+                        normalization=normalization,
+                    )
+                    analysis_metrics[ttl] = wandb.Image(
+                        wandb.Image(
+                            visualization,
+                            caption=f"{ttl}/{block}"
+                        )
+                    )
 
-    if wandb.run is not None:
-        wandb.log(analysis_metrics)
+            if wandb.run is not None:
+                wandb.log(analysis_metrics)
 
 
 
 if __name__ == "__main__":
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument("--save-dir", type=Path, required=True)
-    # parser.add_argument("--experiment-dir", type=Path, required=True )
+    parser.add_argument("--suffix", type=str)
 
     parser.add_argument(
         "--actions", nargs='+', type=str,
@@ -498,20 +821,57 @@ if __name__ == "__main__":
             Actions.train,
             Actions.eval_linear,
             Actions.eval_collapse,
-            Actions.visualize_activations
+            Actions.visualize_activations,
+            Actions.visaualize_feature_activations,
+            Actions.visualize_kld,
+        ],
+        default=[
+            Actions.train,
+            Actions.eval_linear,
+            Actions.eval_collapse,
+            Actions.visualize_activations,
+            Actions.visaualize_feature_activations,
+            Actions.visualize_kld,
         ]
     )
 
     parser.add_argument("--cutoff-class", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=2)
-
+    
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--detach-residual", action="store_true", default=False)
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
-    parser.add_argument("--ent-lambda", type=float, default=0)
-
-    parser.add_argument()
+    parser.add_argument("--dropout", type=float, default=0)
+    parser.add_argument("--cls-len", type=int, default=1)
+    
+    parser.add_argument("--ent-lambda", type=float, default=0.0)
+    parser.add_argument("--ent-temperature", type=float, default=1)
+    parser.add_argument(
+        "--ent-blocks", nargs="+", type=str, 
+        choices=["l1", "l2", "l3", "l4"], 
+        default=["l3"]
+    )
+    parser.add_argument(
+        "--ent-ops", nargs="+", 
+        choices=[EntropyOps.qsuare, EntropyOps.add_min, EntropyOps.softmax, EntropyOps.normalize],
+        default=[EntropyOps.softmax]
+    )
+    parser.add_argument("--ent-axis", choices=[0,1], default=1, type=int)
+    
+    parser.add_argument("--kld-lambda", type=float, default=0.0)
+    parser.add_argument("--kld-share", type=float, default=1.0)
+    parser.add_argument("--kld-norm", type=str, choices=[EntropyOps.softmax, EntropyOps.normalize, None], default=None)
+    
+    parser.add_argument("--kld-blocks", nargs="+", type=str, 
+        choices=["l1", "l2", "l3", "l4"], 
+        default=["l3"]
+    )
+    
+    
+    parser.add_argument("--seed", type=int, default=0)
+    
     args = parser.parse_args()
 
     main(args)
