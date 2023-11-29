@@ -324,6 +324,7 @@ def train(
     lwf_T: float,
     orto_block: str,
     orto_lambda: float,
+    orto_len: int,
     orto_out_shape: int,
     log_to_wandb: bool = True,
     print_every: int = 1,
@@ -335,10 +336,18 @@ def train(
             inputs, _ = next(iter(train_loader))
             outputs = model(inputs.to(device), return_activations=True)
             orto_in_shape = outputs[orto_block].shape[1]
-            orto_model = nn.Linear(
-                orto_in_shape, 
-                orto_out_shape
-            ).to(device)
+
+            orto_seq = []
+            for i in range(orto_len):
+                if i < orto_len-1:
+                    orto_seq.extend([nn.Linear(orto_in_shape, orto_in_shape), nn.ReLU()])
+                else:
+                    orto_seq.append(nn.Linear(
+                        orto_in_shape,
+                        orto_out_shape
+                    ))
+
+            orto_model = nn.Sequential(*orto_seq).to(device)
     else:
         orto_model = None
         
@@ -399,7 +408,7 @@ def train(
 
         metrics_list.append(test_metrics)
 
-    return metrics_list
+    return metrics_list, orto_model
 
 
 def linear_eval(
@@ -482,7 +491,7 @@ def lwf_eval(
         # test_loader = torch.utils.data.DataLoader(test_subset, batch_size=ld.batch_size, shuffle=False, num_workers=ld.num_workers)
         lwf_model = deepcopy(model)
 
-        metrics_list = train(
+        metrics_list, _ = train(
             model=model,
             train_loader=train_ld,
             test_loader=test_ld,
@@ -499,6 +508,7 @@ def lwf_eval(
             orto_block=None,
             orto_lambda=0,
             orto_out_shape=0,
+            orto_len=0
         )
 
         for m in metrics_list:
@@ -516,7 +526,7 @@ def lwf_eval(
     return train_metrics, accuracy_grid
 
 
-def get_detached_activations(model: ResNet, loader: DataLoader) -> Dict[str, torch.Tensor]:
+def get_detached_activations(model: ResNet, loader: DataLoader, orto_model: nn.Module, orto_block: str) -> Dict[str, torch.Tensor]:
     acts = defaultdict(list)
     model.eval()
 
@@ -528,8 +538,12 @@ def get_detached_activations(model: ResNet, loader: DataLoader) -> Dict[str, tor
 
                 if len(v.shape) == 4:
                     v = v.mean(axis=(2, 3))
+
+                if k == orto_block and orto_model is not None:
+                    acts["orto_head"].extend(orto_model(v))
+
                 acts[k].extend(v)
-            acts["y_true"].extend(targets.detach())
+            acts["y_true"].extend(targets)
 
         return {
             k: torch.stack(v)
@@ -703,17 +717,18 @@ def main(args):
         net = torch.nn.DataParallel(net)
         cudnn.benchmark = True
 
+    orto_model=None
     if Actions.train in args.actions:
-        train_metrics = train(
+        train_metrics, orto_model = train(
             model=net,
             train_loader=dataloaders[DataSplits.base_classes][0],
             test_loader=dataloaders[DataSplits.base_classes][1],
             num_epochs=args.epochs,
-
             experiment_dir=experiment_dir,
             orto_block=args.orto_block,
             orto_lambda=args.orto_lambda,
             orto_out_shape=args.orto_width,
+            orto_len=args.orto_len,
             lwf_lambda=0.0,
             lwf_model=None,
             lwf_num_features=None,
@@ -732,8 +747,8 @@ def main(args):
 
     for set_name, (trainloader, testloader) in dataloaders.items():
 
-        train_activations = get_detached_activations(model=net, loader=trainloader)
-        test_activations = get_detached_activations(model=net, loader=testloader)
+        train_activations = get_detached_activations(model=net, loader=trainloader, orto_model=orto_model, orto_block=args.orto_block)
+        test_activations = get_detached_activations(model=net, loader=testloader, orto_model=orto_model, orto_block=args.orto_block)
 
         
         for i, block in enumerate(
