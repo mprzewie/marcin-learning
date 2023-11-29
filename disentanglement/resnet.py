@@ -6,6 +6,8 @@ Reference:
 [1] Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun
     Deep Residual Learning for Image Recognition. arXiv:1512.03385
 '''
+from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -119,6 +121,20 @@ class ResNet(nn.Module):
             layers.append(block(self.in_planes, planes, stride, detach_residual=self.detach_residual))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
+
+    def freeze_up_to(self, block: int, unfreeze: bool = False):
+        blocks: List[nn.Module] = [
+            nn.Sequential(self.bn1, self.conv1, self.layer1),
+            self.layer2,
+            self.layer3,
+            self.layer4
+        ]
+        for i, b in enumerate(blocks):
+            if i < block:
+                b.requires_grad_(unfreeze)
+
+
+
 
     def forward(self, x, return_activations=False):
         c1 = out = F.relu(self.bn1(self.conv1(x)))
