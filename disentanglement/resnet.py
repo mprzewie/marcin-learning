@@ -12,6 +12,69 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class Conv4(nn.Module):
+    def __init__(self, in_channels: int, num_classes: int, cls_len, hidden_size: int=64):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.l1 = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=hidden_size, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        ) # 28x28 -> 14x14
+        self.l2 = nn.Sequential(
+            nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        ) # 14x14 -> 7x7
+        self.l3 = nn.Sequential(
+            nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        ) # 7x7 -> 3x3
+        self.l4 = nn.Sequential(
+            nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1,1))
+        )
+
+        if cls_len > 1:
+            linear_seq = []
+            for i in range(cls_len - 1):
+                linear_seq.extend([nn.Linear(hidden_size, hidden_size), nn.ReLU()])
+            linear_seq.append(nn.Linear(hidden_size, num_classes))
+            self.linear = nn.Sequential(*linear_seq)
+        else:
+            self.linear = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x, return_activations: bool =False):
+        l1 = out = self.l1(x)
+        l2 = out = self.l2(out)
+        l3 = out = self.l3(out)
+        l4 = out = self.l4(out)
+        out = out.reshape(len(out), self.hidden_size)
+        out = self.linear(out)
+
+        if return_activations:
+            return dict(
+                l1=l1,
+                l2=l2,
+                l3=l3,
+                l4=l4,
+                out=out
+            )
+        return out
+
+    def freeze_up_to(self, block: int, unfreeze: bool = False):
+        blocks: List[nn.Module] = [
+            self.l1,
+            self.l2,
+            self.l3,
+            self.l4
+        ]
+        for i, b in enumerate(blocks):
+            if i < block:
+                b.requires_grad_(unfreeze)
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -177,6 +240,7 @@ def ResNet101(num_classes: int = 10):
 
 def ResNet152(num_classes: int = 10):
     return ResNet(Bottleneck, [3, 8, 36, 3], num_classes=num_classes)
+
 
 
 def test():
