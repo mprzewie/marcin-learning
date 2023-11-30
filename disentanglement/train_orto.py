@@ -776,6 +776,18 @@ def main(args):
                         caption=f"{ttl}/{block}"
                     )
                 )
+                if block == args.orto_block:
+                    visualization = activations_visualization(
+                        activations=test_activations[block],
+                        targets=test_activations["y_true"],
+                        title=f"{run_name}\n{ttl}/orto"
+                    )
+                    analysis_metrics[f"{ttl}/orto"] = wandb.Image(
+                        wandb.Image(
+                            visualization,
+                            caption=f"{ttl}/orto"
+                        )
+                    )
 
             if Actions.eval_lwf in args.actions and set_name != DataSplits.base_classes:
                 lwf_metrics, accuracy_grid = lwf_eval(
