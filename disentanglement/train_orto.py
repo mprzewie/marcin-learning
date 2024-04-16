@@ -119,7 +119,6 @@ def get_datasets(
         testset = torchvision.datasets.FashionMNIST(
             root=datadir, train=False, transform=transform, download=True
         )
-
     elif "cifar" in dataset:
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -388,6 +387,7 @@ def train(
                     ))
 
             orto_model = nn.Sequential(*orto_seq).to(device)
+<<<<<<< HEAD
 
             if orto_num_separate_heads is not None:
                 orto_heads = []
@@ -411,12 +411,26 @@ def train(
     optimizer = optim.SGD(
         list(model.parameters()) + list(
             orto_model.parameters() if (orto_model is not None and orto_lambda !=0) else []
+=======
+    else:
+        orto_model = None
+        
+        
+    metrics_list = []
+    optimizer = optim.SGD(
+        list(model.parameters()) + list(
+            orto_model.parameters() if orto_model is not None else []
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
         ),
         lr=lr, momentum=momentum, weight_decay=weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
 
+<<<<<<< HEAD
     best_accuracy = -1
+=======
+    best_accuracy = 0
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
     for epoch in range(num_epochs):
         train_metrics = train_epoch(
             epoch=epoch,
@@ -595,6 +609,7 @@ def get_detached_activations(model: ResNet, loader: DataLoader, orto_model: nn.M
                     v = v.mean(axis=(2, 3))
 
                 if k == orto_block and orto_model is not None:
+<<<<<<< HEAD
                     if not isinstance(orto_model, nn.ModuleList):
                         acts["orto_head"].extend(orto_model(v))
                     else:
@@ -617,6 +632,9 @@ def get_detached_activations(model: ResNet, loader: DataLoader, orto_model: nn.M
                             acts["orto_head"].extend(orto_out_placeholder)
                         
 
+=======
+                    acts["orto_head"].extend(orto_model(v))
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
 
                 acts[k].extend(v)
             acts["y_true"].extend(targets)
@@ -731,7 +749,11 @@ def maybe_setup_wandb(logdir, args=None, run_name_suffix=None, **init_kwargs):
         config=args,
         name=new_run_name,
         dir=logdir,
+<<<<<<< HEAD
         # resume="never",
+=======
+        resume="never",
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
         group=origin_run_name,
         **init_kwargs
     )
@@ -742,6 +764,7 @@ def main(args):
     
     if args.seed is not None:
         np.random.seed(args.seed)
+<<<<<<< HEAD
         torch.manual_seed(args.seed)
         random.seed(args.seed)
 
@@ -750,6 +773,15 @@ def main(args):
                     f"cl{args.cls_len}_lr{args.lr}_wd{args.weight_decay}_m{args.momentum}_"
                     f"or-{args.orto_block}_lb{args.orto_lambda:.1f}_w{args.orto_width}_l{args.orto_len}{('_sh' if args.orto_sep_heads else '')}"
                     f"_s{args.seed}")
+=======
+        torch.random.manual_seed(args.seed)
+        random.seed(args.seed)
+
+    if args.restart_from_run is None:
+        run_name = (f"{args.dataset}_{args.cutoff_class}_{args.arch}_e{args.epochs}_bs{args.batch_size}_"
+                    f"cl{args.cls_len}_lr{args.lr}_wd{args.weight_decay}_m{args.momentum}_"
+                    f"or-{args.orto_block}_lb{args.orto_lambda:.1f}_w{args.orto_width}_l{args.orto_len}_s{args.seed}")
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
 
         if args.suffix is not None:
             run_name += f"_{args.suffix}"
@@ -812,6 +844,7 @@ def main(args):
             lwf_T=None,
             lr=args.lr,
             weight_decay=args.weight_decay,
+<<<<<<< HEAD
             momentum=args.momentum,
             orto_num_separate_heads=(
                 (
@@ -821,6 +854,9 @@ def main(args):
                 )
                 if args.orto_sep_heads else None
             )
+=======
+            momentum=args.momentum
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
         )
 
 
@@ -876,6 +912,7 @@ def main(args):
                         caption=f"{ttl}/{block}"
                     )
                 )
+<<<<<<< HEAD
                 if block == args.orto_block:
                     visualization = activations_visualization(
                         activations=test_activations["orto_head"],
@@ -888,6 +925,8 @@ def main(args):
                             caption=f"{ttl}/orto"
                         )
                     )
+=======
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
 
             if Actions.eval_lwf in args.actions and set_name != DataSplits.base_classes:
                 lwf_metrics, accuracy_grid = lwf_eval(
@@ -944,7 +983,11 @@ def main(args):
 
 if __name__ == "__main__":
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
+<<<<<<< HEAD
     parser.add_argument("--save-dir", "--save_dir", type=Path, required=True)
+=======
+    parser.add_argument("--save-dir", type=Path, required=True)
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
     parser.add_argument("--suffix", type=str)
 
     parser.add_argument(
@@ -966,6 +1009,7 @@ if __name__ == "__main__":
         ]
     )
 
+<<<<<<< HEAD
     parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "fmnist", "cifar100", "cifar10"])
     parser.add_argument("--arch", type=str, default="conv4_64", choices=["conv4_64", "conv4_16", "res18"])
 
@@ -981,23 +1025,49 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--cls_len", type=int, default=1)
+=======
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "cifar100"])
+    parser.add_argument("--arch", type=str, default="conv4_16", choices=["conv4_64", "conv4_16", "res18"])
+
+    parser.add_argument("--cutoff-class", type=int, default=5)
+    parser.add_argument("--num-classes", type=int, default=10)
+
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--num-workers", type=int, default=2)
+    
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--detach-residual", action="store_true", default=False)
+    parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--cls-len", type=int, default=1)
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
 
     parser.add_argument("--lwf-lambda", type=float, default=0.01)
     parser.add_argument("--lwf-T", type=float, default=2.0)
     parser.add_argument("--lwf-num-epochs-per-task", type=int, default=5)
     parser.add_argument("--lwf-lr-modifier", type=float, default=0.1)
 
+<<<<<<< HEAD
     parser.add_argument("--orto_block", type=str, choices=["l1", "l2", "l3", "l4"], default="l4")
     parser.add_argument("--orto_lambda", type=float, default=0.0)
     parser.add_argument("--orto_width", type=int, default=None, help="output size of orto head. If None, defaults to number of classes.")
     parser.add_argument("--orto_len", type=int, default=1, help="num of linear heads in orto head")
     parser.add_argument("--orto_sep_heads", action="store_true")
+=======
+    parser.add_argument("--orto-block", type=str, choices=["l1", "l2", "l3", "l4"], default="l4")
+    parser.add_argument("--orto-lambda", type=float, default=0.0)
+    parser.add_argument("--orto-width", type=int, default=10, help="hidden / output size of orto head.")
+    parser.add_argument("--orto-len", type=int, default=1, help="num of linear heads in orto head")
+
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
     
     parser.add_argument("--restart-from-run", type=str, default=None)
 
     parser.add_argument("--seed", type=int, default=0)
     
     args = parser.parse_args()
+<<<<<<< HEAD
     
     
     if args.orto_width is None:
@@ -1009,6 +1079,8 @@ if __name__ == "__main__":
         else:
             print(f"defaulting to {args.cutoff_class[0]=}")
             args.orto_width = args.cutoff_class[0]
+=======
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
 
     main(args)
 

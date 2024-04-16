@@ -6,6 +6,7 @@ import math
 import torch
 import numpy as np
 
+<<<<<<< HEAD
 def _CKA(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
     return _HSIC(X, Y) / torch.sqrt(_HSIC(X, X) * _HSIC(Y, Y))
 
@@ -19,6 +20,8 @@ def _HSIC(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
 
     return torch.trace(GX @ H @ GY @ H)
 
+=======
+>>>>>>> 76a356788cc12fe340a2fd0e95f756b883316c19
 class CKA(object):
     def __init__(self):
         pass 
