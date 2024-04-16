@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import torch
+
+torch.use_deterministic_algorithms(True)
+
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -107,6 +110,15 @@ def get_datasets(
         testset = torchvision.datasets.MNIST(
             root=datadir, train=False, transform=transform, download=True
         )
+    
+    elif dataset == "fmnist":
+        transform = transforms.ToTensor()
+        trainset = torchvision.datasets.FashionMNIST(
+            root=datadir, train=True, transform=transform, download=True
+        )
+        testset = torchvision.datasets.FashionMNIST(
+            root=datadir, train=False, transform=transform, download=True
+        )
 
     elif "cifar" in dataset:
         transform_train = transforms.Compose([
@@ -120,10 +132,12 @@ def get_datasets(
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-
-        trainset = torchvision.datasets.CIFAR100(
+        
+        ds_cls = torchvision.datasets.CIFAR10 if dataset == "cifar10" else torchvision.datasets.CIFAR100
+       
+        trainset = ds_cls(
             root=datadir, train=True, download=True, transform=transform_train)
-        testset = torchvision.datasets.CIFAR100(
+        testset = ds_cls(
             root=datadir, train=False, download=True, transform=transform_test)
 
     else:
@@ -133,16 +147,20 @@ def get_datasets(
 
 def get_dataloaders(
     dataset: str,
-    cutoff_class: int,
+    cutoff_class: List[int],
     batch_size: int,
     num_workers: int
 ) -> Dict[str, Tuple[DataLoader, DataLoader]]:
-
+    
+    cutoff_classes = cutoff_class if len(cutoff_class) > 1 else list(range(cutoff_class[0]))
+    
+    print("base classes", cutoff_classes)
+    
     trainset, testset = get_datasets(dataset)
-    indices_train_1 = [i for i, (x, y) in enumerate(trainset) if y < cutoff_class]
-    indices_train_2 = [i for i, (x, y) in enumerate(trainset) if y >= cutoff_class]
-    indices_test_1 = [i for i, (x, y) in enumerate(testset) if y < cutoff_class]
-    indices_test_2 = [i for i, (x, y) in enumerate(testset) if y >= cutoff_class]
+    indices_train_1 = [i for i, (x, y) in enumerate(trainset) if y in cutoff_classes]
+    indices_train_2 = [i for i, (x, y) in enumerate(trainset) if y not in cutoff_classes]
+    indices_test_1 = [i for i, (x, y) in enumerate(testset) if y in cutoff_classes]
+    indices_test_2 = [i for i, (x, y) in enumerate(testset) if y not in cutoff_classes]
 
     trainset_1, trainset_2 = [
         torch.utils.data.Subset(trainset, inds)
@@ -187,6 +205,9 @@ def train_epoch(
     orto_lambda: float,
 ):
     model.train()
+    if orto_model is not None:
+        orto_model.train()
+        
     criterion = nn.CrossEntropyLoss()
 
     train_loss = 0
@@ -227,7 +248,24 @@ def train_epoch(
         
         if orto_model is not None:
             orto_out = outputs[orto_block].mean(axis=(2, 3))
-            orto_out = orto_model(orto_out)
+
+            if not isinstance(orto_model, nn.ModuleList):
+                orto_out = orto_model(orto_out)
+            else:
+                orto_out_placeholder = None
+                for c, oh in enumerate(orto_model):
+                    c_ind = targets==c
+
+                    if not torch.any(c_ind):
+                        continue
+                    orto_out_c = oh(orto_out[c_ind])
+
+                    if orto_out_placeholder is None:
+                        orto_out_placeholder = torch.zeros(len(orto_out), orto_out_c.shape[1]).to(orto_out.device)
+
+                    orto_out_placeholder[c_ind] = orto_out_c
+                orto_out = orto_out_placeholder
+
             orto_out = F.softmax(orto_out, dim=1) + 1e-6
             ort_ind_ent = -(orto_out * orto_out.log()).sum(dim=1).mean()
             # minimize entropy of individual samples (each sample should activate one ort. output strongly)
@@ -245,7 +283,8 @@ def train_epoch(
                 "ort_mca_ent": ort_mca_ent.item(),
                 "ort_loss": ort_loss.item(),
             }
-            effective_loss = effective_loss + (orto_lambda * ort_loss)
+            if orto_lambda != 0:
+                effective_loss = effective_loss + (orto_lambda * ort_loss)
         else:
             orto_losses = dict()
 
@@ -326,6 +365,7 @@ def train(
     orto_lambda: float,
     orto_len: int,
     orto_out_shape: int,
+    orto_num_separate_heads: Optional[int],
     log_to_wandb: bool = True,
     print_every: int = 1,
 
@@ -348,20 +388,35 @@ def train(
                     ))
 
             orto_model = nn.Sequential(*orto_seq).to(device)
+
+            if orto_num_separate_heads is not None:
+                orto_heads = []
+                for i in range(orto_num_separate_heads):
+                    oh = deepcopy(orto_model)
+                    for layer in oh.children():
+                        if hasattr(layer, 'reset_parameters'):
+                            layer.reset_parameters()
+                    orto_heads.append(oh)
+
+                orto_model = nn.ModuleList(orto_heads)
+
+
     else:
         orto_model = None
         
-        
+    torch.random.manual_seed(0) 
+    # initializing orto_head changes randomness of dataloder?
+    
     metrics_list = []
     optimizer = optim.SGD(
         list(model.parameters()) + list(
-            orto_model.parameters() if orto_model is not None else []
+            orto_model.parameters() if (orto_model is not None and orto_lambda !=0) else []
         ),
         lr=lr, momentum=momentum, weight_decay=weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
 
-    best_accuracy = 0
+    best_accuracy = -1
     for epoch in range(num_epochs):
         train_metrics = train_epoch(
             epoch=epoch,
@@ -540,7 +595,28 @@ def get_detached_activations(model: ResNet, loader: DataLoader, orto_model: nn.M
                     v = v.mean(axis=(2, 3))
 
                 if k == orto_block and orto_model is not None:
-                    acts["orto_head"].extend(orto_model(v))
+                    if not isinstance(orto_model, nn.ModuleList):
+                        acts["orto_head"].extend(orto_model(v))
+                    else:
+                        orto_out_placeholder = None
+
+                        for c, oh in enumerate(orto_model):
+                            c_ind = targets == c
+
+                            if not torch.any(c_ind):
+                                continue
+
+                            orto_out_c = oh(v[c_ind])
+
+                            if orto_out_placeholder is None:
+                                orto_out_placeholder = torch.zeros(len(v), orto_out_c.shape[1]).to(v.device)
+
+                            orto_out_placeholder[c_ind] = orto_out_c
+                        
+                        if orto_out_placeholder is not None:
+                            acts["orto_head"].extend(orto_out_placeholder)
+                        
+
 
                 acts[k].extend(v)
             acts["y_true"].extend(targets)
@@ -655,7 +731,7 @@ def maybe_setup_wandb(logdir, args=None, run_name_suffix=None, **init_kwargs):
         config=args,
         name=new_run_name,
         dir=logdir,
-        resume="never",
+        # resume="never",
         group=origin_run_name,
         **init_kwargs
     )
@@ -666,13 +742,14 @@ def main(args):
     
     if args.seed is not None:
         np.random.seed(args.seed)
-        torch.random.manual_seed(args.seed)
+        torch.manual_seed(args.seed)
         random.seed(args.seed)
 
     if args.restart_from_run is None:
-        run_name = (f"{args.dataset}_{args.cutoff_class}_{args.arch}_e{args.epochs}_bs{args.batch_size}_"
+        run_name = (f"{args.dataset}_{'-'.join(map(str,args.cutoff_class))}_{args.arch}_e{args.epochs}_bs{args.batch_size}_"
                     f"cl{args.cls_len}_lr{args.lr}_wd{args.weight_decay}_m{args.momentum}_"
-                    f"or-{args.orto_block}_lb{args.orto_lambda:.1f}_w{args.orto_width}_l{args.orto_len}_s{args.seed}")
+                    f"or-{args.orto_block}_lb{args.orto_lambda:.1f}_w{args.orto_width}_l{args.orto_len}{('_sh' if args.orto_sep_heads else '')}"
+                    f"_s{args.seed}")
 
         if args.suffix is not None:
             run_name += f"_{args.suffix}"
@@ -735,7 +812,15 @@ def main(args):
             lwf_T=None,
             lr=args.lr,
             weight_decay=args.weight_decay,
-            momentum=args.momentum
+            momentum=args.momentum,
+            orto_num_separate_heads=(
+                (
+                    args.cutoff_class[0]
+                    if len(args.cutoff_class) == 1
+                    else len(args.cutoff_class)
+                )
+                if args.orto_sep_heads else None
+            )
         )
 
 
@@ -793,7 +878,7 @@ def main(args):
                 )
                 if block == args.orto_block:
                     visualization = activations_visualization(
-                        activations=test_activations[block],
+                        activations=test_activations["orto_head"],
                         targets=test_activations["y_true"],
                         title=f"{run_name}\n{ttl}/orto"
                     )
@@ -859,7 +944,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--save-dir", type=Path, required=True)
+    parser.add_argument("--save-dir", "--save_dir", type=Path, required=True)
     parser.add_argument("--suffix", type=str)
 
     parser.add_argument(
@@ -881,38 +966,49 @@ if __name__ == "__main__":
         ]
     )
 
-    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "cifar100"])
-    parser.add_argument("--arch", type=str, default="conv4_16", choices=["conv4_64", "conv4_16", "res18"])
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "fmnist", "cifar100", "cifar10"])
+    parser.add_argument("--arch", type=str, default="conv4_64", choices=["conv4_64", "conv4_16", "res18"])
 
-    parser.add_argument("--cutoff-class", type=int, default=5)
-    parser.add_argument("--num-classes", type=int, default=10)
+    parser.add_argument("--cutoff_class", type=int, default=[5], nargs="+")
+    parser.add_argument("--num_classes", type=int, default=10)
 
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--num_workers", type=int, default=2)
     
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--detach-residual", action="store_true", default=False)
+    parser.add_argument("--detach_residual", action="store_true", default=False)
     parser.add_argument("--lr", type=float, default=0.1)
-    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
-    parser.add_argument("--cls-len", type=int, default=1)
+    parser.add_argument("--cls_len", type=int, default=1)
 
     parser.add_argument("--lwf-lambda", type=float, default=0.01)
     parser.add_argument("--lwf-T", type=float, default=2.0)
     parser.add_argument("--lwf-num-epochs-per-task", type=int, default=5)
     parser.add_argument("--lwf-lr-modifier", type=float, default=0.1)
 
-    parser.add_argument("--orto-block", type=str, choices=["l1", "l2", "l3", "l4"], default="l4")
-    parser.add_argument("--orto-lambda", type=float, default=0.0)
-    parser.add_argument("--orto-width", type=int, default=10, help="hidden / output size of orto head.")
-    parser.add_argument("--orto-len", type=int, default=1, help="num of linear heads in orto head")
-
+    parser.add_argument("--orto_block", type=str, choices=["l1", "l2", "l3", "l4"], default="l4")
+    parser.add_argument("--orto_lambda", type=float, default=0.0)
+    parser.add_argument("--orto_width", type=int, default=None, help="output size of orto head. If None, defaults to number of classes.")
+    parser.add_argument("--orto_len", type=int, default=1, help="num of linear heads in orto head")
+    parser.add_argument("--orto_sep_heads", action="store_true")
     
     parser.add_argument("--restart-from-run", type=str, default=None)
 
     parser.add_argument("--seed", type=int, default=0)
     
     args = parser.parse_args()
+    
+    
+    if args.orto_width is None:
+        print(f"{args.orto_width=}", end=",ś ")
+        
+        if len(args.cutoff_class) > 1:
+            print(f"defaulting to {len(args.cutoff_class)=}")
+            args.orto_width = len(args.cutoff_class)
+        else:
+            print(f"defaulting to {args.cutoff_class[0]=}")
+            args.orto_width = args.cutoff_class[0]
 
     main(args)
 
